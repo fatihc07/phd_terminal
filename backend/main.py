@@ -249,13 +249,30 @@ def get_stock_detail(symbol: str):
         def get_val(key, default="-"):
             return info.get(key, default)
 
-        # Temel veriler
+        # Çeviri Fonksiyonu
+        def tr(text):
+            if not text or text == "-": return text
+            try:
+                # deep_translator yüklü ise kullan
+                from deep_translator import GoogleTranslator
+                return GoogleTranslator(source='auto', target='tr').translate(text)
+            except ImportError:
+                return text # Yüklü değilse orijinali dön
+            except Exception as e:
+                print(f"Translation error: {e}")
+                return text
+
+        description = get_val("longBusinessSummary", "Şirket açıklaması bulunamadı.")
+        sector = get_val("sector")
+        industry = get_val("industry")
+
+        # Çevirileri Yap
         data = {
             "symbol": original_symbol,
             "name": get_val("longName", get_val("shortName")),
-            "description": get_val("longBusinessSummary", "Şirket açıklaması bulunamadı."),
-            "sector": get_val("sector"),
-            "industry": get_val("industry"),
+            "description": tr(description) if description != "Şirket açıklaması bulunamadı." else description,
+            "sector": tr(sector),
+            "industry": tr(industry),
             "website": get_val("website"),
             "logo_url": get_val("logo_url", ""), 
             "price": get_val("currentPrice", get_val("regularMarketPrice", 0)),
