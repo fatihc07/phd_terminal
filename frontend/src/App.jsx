@@ -521,49 +521,111 @@ function App() {
               <div className="loading-state">Yükleniyor...</div>
             ) : (
               <>
-                <div className="dashboard-grid">
-                  {(activeTab === 'Favorites' ? displayedStocks : displayedStocks.slice(0, 5)).map(stock => (
-                    <div 
-                        key={stock.symbol} 
-                        className="stock-card" 
-                        style={{position: 'relative', cursor: 'pointer'}}
-                        onClick={() => setActiveStock(stock.symbol)}
-                    >
-                      <button 
-                        className="fav-btn"
-                        onClick={(e) => toggleFavorite(stock.symbol, e)}
-                        style={{
-                          position: 'absolute',
-                          top: '10px',
-                          right: '10px',
-                          background: 'none',
-                          border: 'none',
-                          cursor: 'pointer',
-                          color: favoriteSymbols.includes(stock.symbol) ? '#FFD700' : 'var(--text-secondary)',
-                          fontSize: '1.2rem',
-                          zIndex: 10
-                        }}
-                      >
-                        {favoriteSymbols.includes(stock.symbol) ? '★' : '☆'}
-                      </button>
-                      <div className="stock-header">
-                        <div className="stock-id">
-                          <span className="stock-symbol">{stock.symbol.replace('.IS', '')}</span>
-                          <div className="stock-name-small">{stock.name}</div>
+                <div className="dashboard-grid-container">
+                    {activeTab === 'Favorites' ? (
+                        <div className="dashboard-grid">
+                            {displayedStocks.map(stock => (
+                                <div 
+                                    key={stock.symbol} 
+                                    className="stock-card" 
+                                    style={{position: 'relative', cursor: 'pointer'}}
+                                    onClick={() => setActiveStock(stock.symbol)}
+                                >
+                                <button 
+                                    className="fav-btn"
+                                    onClick={(e) => toggleFavorite(stock.symbol, e)}
+                                    style={{
+                                    position: 'absolute',
+                                    top: '10px',
+                                    right: '10px',
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    color: favoriteSymbols.includes(stock.symbol) ? '#FFD700' : 'var(--text-secondary)',
+                                    fontSize: '1.2rem',
+                                    zIndex: 10
+                                    }}
+                                >
+                                    {favoriteSymbols.includes(stock.symbol) ? '★' : '☆'}
+                                </button>
+                                <div className="stock-header">
+                                    <div className="stock-id">
+                                    <span className="stock-symbol">{stock.symbol.replace('.IS', '')}</span>
+                                    <div className="stock-name-small">{stock.name}</div>
+                                    </div>
+                                    <div style={{textAlign: 'right', marginTop:'20px'}}>
+                                    <div className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''} style={{fontWeight: 'bold', fontSize: '1.2rem'}}>
+                                        {stock.changePercent}%
+                                    </div>
+                                    </div>
+                                </div>
+                                <div className="stock-price">{stock.price.toLocaleString()}</div>
+                                <div style={{fontSize: '0.8rem', color:'var(--text-secondary)', marginTop:'5px'}}>
+                                    Açılış: {stock.open ? stock.open.toLocaleString() : '-'}
+                                </div>
+                                </div>
+                            ))}
                         </div>
-                        <div style={{textAlign: 'right', marginTop:'20px'}}>
-                           <div className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''} style={{fontWeight: 'bold', fontSize: '1.2rem'}}>
-                              {stock.changePercent}%
-                           </div>
-                        </div>
-                      </div>
-                      <div className="stock-price">{stock.price.toLocaleString()}</div>
-                      <div style={{fontSize: '0.8rem', color:'var(--text-secondary)', marginTop:'5px'}}>
-                        Açılış: {stock.open ? stock.open.toLocaleString() : '-'}
-                      </div>
-
-                    </div>
-                  ))}
+                    ) : (
+                        // Dashboard View - Grouped by Sector
+                        Object.entries(
+                            displayedStocks.reduce((groups, stock) => {
+                                const sector = stock.sector_group || 'Diğer';
+                                if (!groups[sector]) groups[sector] = [];
+                                groups[sector].push(stock);
+                                return groups;
+                            }, {})
+                        ).map(([sector, stocks]) => (
+                            <div key={sector} style={{ marginBottom: '2rem' }}>
+                                <h3 style={{ borderBottom: '1px solid var(--border-color)', paddingBottom: '0.5rem', marginBottom: '1rem', color: 'var(--accent-color)' }}>
+                                    {sector}
+                                </h3>
+                                <div className="dashboard-grid">
+                                    {stocks.map(stock => (
+                                        <div 
+                                            key={stock.symbol} 
+                                            className="stock-card" 
+                                            style={{position: 'relative', cursor: 'pointer'}}
+                                            onClick={() => setActiveStock(stock.symbol)}
+                                        >
+                                            <button 
+                                                className="fav-btn"
+                                                onClick={(e) => toggleFavorite(stock.symbol, e)}
+                                                style={{
+                                                position: 'absolute',
+                                                top: '10px',
+                                                right: '10px',
+                                                background: 'none',
+                                                border: 'none',
+                                                cursor: 'pointer',
+                                                color: favoriteSymbols.includes(stock.symbol) ? '#FFD700' : 'var(--text-secondary)',
+                                                fontSize: '1.2rem',
+                                                zIndex: 10
+                                                }}
+                                            >
+                                                {favoriteSymbols.includes(stock.symbol) ? '★' : '☆'}
+                                            </button>
+                                            <div className="stock-header">
+                                                <div className="stock-id">
+                                                <span className="stock-symbol">{stock.symbol.replace('.IS', '')}</span>
+                                                <div className="stock-name-small">{stock.name}</div>
+                                                </div>
+                                                <div style={{textAlign: 'right', marginTop:'20px'}}>
+                                                <div className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''} style={{fontWeight: 'bold', fontSize: '1.2rem'}}>
+                                                    {stock.changePercent}%
+                                                </div>
+                                                </div>
+                                            </div>
+                                            <div className="stock-price">{stock.price.toLocaleString()}</div>
+                                            <div style={{fontSize: '0.8rem', color:'var(--text-secondary)', marginTop:'5px'}}>
+                                                Açılış: {stock.open ? stock.open.toLocaleString() : '-'}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ))
+                    )}
                 </div>
 
                 {activeTab === 'Dashboard' && displayedStocks.length > 5 && (
