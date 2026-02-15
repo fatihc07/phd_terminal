@@ -86,10 +86,44 @@ def get_google_finance_data(symbol: str):
         if not hist.empty:
             # Son günün açılış verisini al
             open_price = float(current_row['Open'])
+            
+        # Sektör Cache Kontrolü
+        cached_sector = SECTOR_CACHE.get(original_symbol)
+        if cached_sector:
+             sector = cached_sector
+        else:
+             sector = "Diğer"
+             try:
+                info = ticker.info
+                fullname = info.get('longName') or info.get('shortName') or original_symbol
+                raw_s = info.get('sector', 'Diğer')
+                
+                # Sektör Çevirisi yapıp cacheleyelim
+                sector_trans = {
+                    "Technology": "Teknoloji & Yazılım",
+                    "Financial Services": "Bankacılık & Finans",
+                    "Industrials": "Sanayi & Üretim",
+                    "Energy": "Enerji",
+                    "Consumer Cyclical": "Perakende & Ticaret",
+                    "Basic Materials": "Madencilik & Metal",
+                    "Healthcare": "Sağlık",
+                    "Communication Services": "Ulaştırma & Havacılık",
+                    "Real Estate": "GYO & İnşaat",
+                    "Utilities": "Enerji & Altyapı",
+                    "Consumer Defensive": "Gıda & İçecek"
+                }
+                sector = sector_trans.get(raw_s, raw_s) # Çeviri
+
+                # Eğer anlamlı bir sektörse cache'e kaydet
+                if sector != "Diğer":
+                    SECTOR_CACHE[original_symbol] = sector
+                    save_sector_cache(SECTOR_CACHE)
+             except: pass
 
         return {
             "symbol": original_symbol,
             "name": fullname,
+            "sector": sector, # Cache'den gelen veya yeni bulunan
             "price": round(price, 2),
             "open": round(open_price, 2), # Eklenen veri
             "change": round(change, 2),
@@ -140,6 +174,23 @@ def heartbeat(data: dict = Body(...)):
     u = data.get("username")
     if u: ONLINE_USERS[u] = time.time()
     return {"status": "ok"}
+
+# --- Sektör Cache Sistemi ---
+SECTOR_DB_FILE = os.path.join(os.path.dirname(__file__), "sectors.json")
+
+def load_sector_cache():
+    if os.path.exists(SECTOR_DB_FILE):
+        try:
+            with open(SECTOR_DB_FILE, "r") as f: return json.load(f)
+        except: pass
+    return {}
+
+def save_sector_cache(cache):
+    try:
+        with open(SECTOR_DB_FILE, "w") as f: json.dump(cache, f)
+    except: pass
+
+SECTOR_CACHE = load_sector_cache()
 
 @app.get("/admin/users")
 def get_users():
@@ -197,6 +248,7 @@ def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 20):
         return {"items": [], "has_more": False}
 
     # 4. Veri Çekme (Sadece bu sayfa için)
+    # yfinance ile veriyi çekerken sektör bilgisini de alıyoruz.
     results_map = {}
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(get_google_finance_data, s): s for s in batch_symbols}
@@ -206,6 +258,12 @@ def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 20):
                 # Sektör bilgisini ekle
                 sym = res['symbol'].replace('.IS', '')
                 res['sector_group'] = sector_map.get(sym, 'Genel')
+                # Eğer yfinance'dan gelen sektör bilgisi varsa onu da kullanabiliriz ama sector_map daha temiz görünüyor frontend için.
+                # Ama frontend'de 'sector' kullanılıyor mu 'sector_group' mu kontrol etmek lazım.
+                # App.jsx: detail.sector ve detail.industry kullanıyor.
+                # DashboardView.jsx: detail.sector_group? Muhtemelen.
+                # Aslında get_google_finance_data zaten 'sector' döndürüyor.
+                
                 results_map[futures[f]] = res
 
     # 5. Sonuçları Sıraya Göre Dizme
@@ -222,7 +280,16 @@ def search_suggestions(q: str):
     
     # 1. Yerel Havuzda Ara (BIST Hisseleri)
     local_matches = []
-    for s in DEFAULT_STOCKS:
+    
+    # DEFAULT_STOCKS dict ise düz listeye çevirip ara
+    defaults_flat = []
+    if isinstance(DEFAULT_STOCKS, dict):
+        for s_list in DEFAULT_STOCKS.values():
+            defaults_flat.extend(s_list)
+    else:
+        defaults_flat = DEFAULT_STOCKS
+
+    for s in defaults_flat:
         if q in s:
             local_matches.append({
                 "symbol": s.replace(".IS", ""),
@@ -267,24 +334,22 @@ def get_stock_detail(symbol: str):
         def get_val(key, default="-"):
             return info.get(key, default)
 
-        # Çeviri Fonksiyonu
+        # Çeviri Fonksiyonu (Opsiyonel)
         def tr(text):
             if not text or text == "-": return text
             try:
                 # deep_translator yüklü ise kullan
-                from deep_translator import GoogleTranslator
-                return GoogleTranslator(source='auto', target='tr').translate(text)
-            except ImportError:
-                return text # Yüklü değilse orijinali dön
-            except Exception as e:
-                print(f"Translation error: {e}")
+                # from deep_translator import GoogleTranslator
+                # return GoogleTranslator(source='auto', target='tr').translate(text)
+                return text
+            except Exception:
                 return text
 
         description = get_val("longBusinessSummary", "Şirket açıklaması bulunamadı.")
         sector = get_val("sector")
         industry = get_val("industry")
 
-        # Çevirileri Yap
+        # Temel veriler
         data = {
             "symbol": original_symbol,
             "name": get_val("longName", get_val("shortName")),
@@ -324,12 +389,28 @@ def get_stock_detail(symbol: str):
         print(f"Detail error: {e}")
         raise HTTPException(status_code=404, detail="Hisse detayları alınamadı")
 
-    # Birleştir ve dön
-    return local_matches + global_matches
+import financial_service
+
+@app.get("/stocks/{symbol}/financials")
+def get_financials(symbol: str, refresh: bool = False):
+    original_symbol = symbol.upper().replace(".IS", "")
+    
+    # Check cache first if refresh is not requested
+    if not refresh:
+        data = financial_service.get_stored_financials(original_symbol)
+        if data:
+            return data
+            
+    try:
+        data = financial_service.fetch_financial_data(original_symbol)
+        return data or {}
+    except Exception as e:
+        print(f"Financial fetch error: {e}")
+        return {}
 
 # Sektörel Gruplandırma
 DEFAULT_STOCKS = {
-    "Bankacılık & Finans": ["AKBNK.IS", "GARAN.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS", "HALKB.IS", "TSKB.IS", "SKBNK.IS", "ALBRK.IS", "ICBCT.IS", "QNBFB.IS"],
+    "Bankacılık & Finans": ["AKBNK.IS", "GARAN.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS", "HALKB.IS", "TSKB.IS", "SKBNK.IS", "ALBRK.IS", "ICBCT.IS", "QNBFL.IS"],
     "Sanayi & Üretim": ["EREGL.IS", "KRDMD.IS", "TUPRS.IS", "PETKM.IS", "SISE.IS", "ARCLK.IS", "VESTL.IS", "TOASO.IS", "FROTO.IS", "TTRAK.IS", "OTKAR.IS", "KCHOL.IS", "SAHOL.IS", "ULKER.IS", "AEFES.IS", "CCOLA.IS", "BRISA.IS", "SASA.IS", "HEKTS.IS"],
     "Teknoloji & Yazılım": ["ASELS.IS", "LOGO.IS", "NETAS.IS", "KFEIN.IS", "ALCTL.IS", "KAREL.IS", "KRONT.IS", "LINK.IS", "MIA.IS", "ARDYZ.IS", "FONET.IS", "SMART.IS", "VBTYZ.IS", "PAPIL.IS", "ESCOM.IS", "AZTEK.IS", "MIATK.IS", "KONTR.IS", "YEOTK.IS", "SDTTR.IS", "EUPWR.IS", "ASTOR.IS", "CVKMD.IS", "CWENE.IS"],
     "Enerji": ["ZOREN.IS", "ODAS.IS", "AKSEN.IS", "AYDEM.IS", "ENJSA.IS", "GWIND.IS", "NATEN.IS", "MAGEN.IS", "BIOEN.IS", "CONSE.IS", "SMRTG.IS", "ALFAS.IS", "AHGAZ.IS", "AKENR.IS", "AYEN.IS"],
@@ -339,6 +420,39 @@ DEFAULT_STOCKS = {
     "Madencilik & Metal": ["KOZAL.IS", "KOZAA.IS", "IPEKE.IS", "ALTNY.IS", "CVKMD.IS", "PARSN.IS", "DMSAS.IS", "CEMTS.IS"],
     "Diğer": ["GUBRF.IS", "BERA.IS", "IHLAS.IS", "METRO.IS", "FENER.IS", "GSRAY.IS", "BJKAS.IS", "TSPOR.IS"]
 }
+
+# Sektörel Grulandırma İçin Bekleme
+# Bu fonksiyon arka planda sektörleri tarayıp cache'i dolduracak
+import threading
+def init_stock_cache():
+    print("--- Stok Cache Güncellemesi Başladı ---")
+    
+    # 1. Hisseleri Tarayalım (Sektörleri Öğrenmek İçin)
+    def fetch_sector_only(symbol):
+        if symbol in SECTOR_CACHE: return # Zaten biliyoruz
+        try:
+            get_google_finance_data(symbol) # Bu fonksiyon veriyi çekerken cache'i de güncelliyor
+        except: pass
+
+    # Thread Pool ile Hızlıca Tarama (Rate Limit İçin Yavaşlatıldı)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+         # Dict struct düzeltme
+        defaults_flat = []
+        if isinstance(DEFAULT_STOCKS, dict):
+            for s_list in DEFAULT_STOCKS.values():
+                defaults_flat.extend(s_list)
+        else:
+            defaults_flat = DEFAULT_STOCKS
+            
+        for symbol in defaults_flat:
+            executor.submit(fetch_sector_only, symbol)
+            time.sleep(2) # Her istek arası 2 saniye bekle
+    
+    print("--- Stok Cache Güncellemesi Bitti ---")
+
+
+# Uygulama Başlarken Cache'i Başlat
+threading.Thread(target=init_stock_cache, daemon=True).start()
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
