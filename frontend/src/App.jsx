@@ -567,7 +567,7 @@ function App() {
                            </div>
                         </div>
                       </div>
-                      <div className="stock-price">{stock.price.toLocaleString()}</div>
+                      <div className="stock-price">{stock.price?.toLocaleString()}</div>
                       <div style={{fontSize: '0.8rem', color:'var(--text-secondary)', marginTop:'5px'}}>
                         Açılış: {stock.open ? stock.open.toLocaleString() : '-'}
                       </div>
@@ -617,7 +617,7 @@ function App() {
                                     </div>
                                     </td>
                                     <td>{stock.open ? stock.open.toLocaleString() : '-'}</td>
-                                    <td>{stock.price.toLocaleString()}</td>
+                                    <td>{stock.price?.toLocaleString()}</td>
                                     <td className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''}>
                                     <span style={{fontWeight:'bold'}}>{stock.changePercent}%</span>
                                     </td>
@@ -663,6 +663,8 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
   const [financials, setFinancials] = useState(null);
   const [loading, setLoading] = useState(true);
   const [finLoading, setFinLoading] = useState(true);
+  const [p1, setP1] = useState("");
+  const [p2, setP2] = useState("");
 
   useEffect(() => {
     const fetchDetail = async () => {
@@ -685,6 +687,13 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
             if (res.ok) {
                 const data = await res.json();
                 setFinancials(data);
+                if (data.periods && data.periods.length >= 2) {
+                    setP1(data.periods[0]); // En yeni
+                    setP2(data.periods[1]); // Bir önceki
+                } else if (data.periods && data.periods.length === 1) {
+                    setP1(data.periods[0]);
+                    setP2(data.periods[0]);
+                }
             }
             setFinLoading(false);
         } catch (e) {
@@ -846,28 +855,62 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
 
               {financials ? (
                   <div className="stock-table-container" style={{ maxHeight: '600px', overflowY: 'auto' }}>
-                      <table style={{ minWidth: '1500px' }}>
+                      <div style={{ display: 'flex', gap: '20px', marginBottom: '15px', background: 'rgba(255,255,255,0.05)', padding: '10px', borderRadius: '8px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Dönem 1 (Yeni):</label>
+                              <select 
+                                  value={p1} 
+                                  onChange={(e) => setP1(e.target.value)}
+                                  style={{ background: '#222', color: '#fff', border: '1px solid #444', padding: '4px 8px', borderRadius: '4px' }}
+                              >
+                                  {financials.periods.map(p => <option key={p} value={p}>{p}</option>)}
+                              </select>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                              <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Dönem 2 (Eski):</label>
+                              <select 
+                                  value={p2} 
+                                  onChange={(e) => setP2(e.target.value)}
+                                  style={{ background: '#222', color: '#fff', border: '1px solid #444', padding: '4px 8px', borderRadius: '4px' }}
+                              >
+                                  {financials.periods.map(p => <option key={p} value={p}>{p}</option>)}
+                              </select>
+                          </div>
+                      </div>
+
+                      <table style={{ width: '100%' }}>
                           <thead style={{ position: 'sticky', top: 0, background: 'var(--card-bg)', zIndex: 10 }}>
                               <tr>
-                                  <th style={{ position: 'sticky', left: 0, background: 'var(--card-bg)', zIndex: 11, minWidth: '300px' }}>KALEM</th>
-                                  {financials.periods.map(period => (
-                                      <th key={period} style={{ textAlign: 'right' }}>{period}</th>
-                                  ))}
+                                  <th style={{ textAlign: 'left', width: '40%' }}>KALEM</th>
+                                  <th style={{ textAlign: 'right' }}>{p1}</th>
+                                  <th style={{ textAlign: 'right' }}>{p2}</th>
+                                  <th style={{ textAlign: 'right' }}>Değişim</th>
                               </tr>
                           </thead>
                           <tbody>
-                              {financials.data.map(item => (
-                                  <tr key={item.code}>
-                                      <td style={{ position: 'sticky', left: 0, background: 'var(--card-bg)', zIndex: 9, fontSize: '0.85rem' }}>
-                                          {item.label}
-                                      </td>
-                                      {financials.periods.map(period => (
-                                          <td key={period} style={{ textAlign: 'right', fontSize: '0.85rem' }}>
-                                              {item.values[period] !== undefined ? item.values[period].toLocaleString() : '-'}
+                              {financials.data.map(item => {
+                                  const val1 = item.values[p1];
+                                  const val2 = item.values[p2];
+                                  let diffPerc = null;
+                                  if (val2 && val1) {
+                                      diffPerc = ((Number(val1) - Number(val2)) / Math.abs(Number(val2))) * 100;
+                                  }
+
+                                  return (
+                                      <tr key={item.code} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                                          <td style={{ fontSize: '0.85rem', padding: '8px 0' }}>{item.label}</td>
+                                          <td style={{ textAlign: 'right', fontSize: '0.85rem' }}>
+                                              { (val1 !== null && val1 !== undefined) ? Number(val1).toLocaleString() : '-' }
                                           </td>
-                                      ))}
-                                  </tr>
-                              ))}
+                                          <td style={{ textAlign: 'right', fontSize: '0.85rem' }}>
+                                              { (val2 !== null && val2 !== undefined) ? Number(val2).toLocaleString() : '-' }
+                                          </td>
+                                          <td style={{ textAlign: 'right', fontSize: '0.85rem', color: diffPerc > 0 ? '#00ff00' : diffPerc < 0 ? '#ff4d4d' : 'inherit' }}>
+                                              { diffPerc !== null ? `${diffPerc > 0 ? '+' : ''}${diffPerc.toFixed(2)}%` : '-' }
+                                          </td>
+                                      </tr>
+                                  );
+                              })}
                           </tbody>
                       </table>
                   </div>

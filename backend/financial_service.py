@@ -3,10 +3,26 @@ import json
 import os
 import urllib3
 import pandas as pd
+import ssl
+import requests
+
+# SSL sertifika hatasını atlamak için (Özellikle Mac cihazlarda gerekebilir)
+ssl._create_default_https_context = ssl._create_unverified_context
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# requests kütüphanesini verify=False yapacak şekilde yamalayalım
+old_request = requests.Session.request
+def new_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return old_request(self, method, url, **kwargs)
+requests.Session.request = new_request
+
 try:
     from isyatirimhisse import fetch_financials as isy_fetch
 except ImportError:
     isy_fetch = None
+
+# ... (cache ve diğer değişkenler)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -97,9 +113,10 @@ def fetch_financials(symbol):
     try:
         # Kütüphane yardımıyla veriyi çekelim
         df = isy_fetch(
-            symbol=symbol, 
+            symbols=symbol, 
             start_year=str(start_year), 
             end_year=str(curr_year), 
+            exchange='TRY',
             financial_group=group
         )
         
@@ -150,9 +167,10 @@ def fetch_financials(symbol):
             return res
             
     except Exception as e:
-        print(f"isyatirimhisse hatası ({symbol}): {e}")
-        
-    return None
+        print(f"isyatirimhisse hatası ({symbol}): {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def get_stock_financials(symbol):
     """
@@ -161,14 +179,20 @@ def get_stock_financials(symbol):
     symbol = symbol.upper().replace(".IS", "")
     cached = FINANCIAL_CACHE.get(symbol)
     
-    # Eğer cache yoksa veya 1 günden eskiyse güncelle
+    # Eğer cache yoksa veya 30 günden eskiyse güncelle (Mali tablolar nadir değişir)
     should_update = True
     if cached:
         last_updated = datetime.fromisoformat(cached["last_updated"])
-        if (datetime.now() - last_updated).days < 1:
+        if (datetime.now() - last_updated).days < 30:
             should_update = False
             
     if should_update:
         return fetch_financials(symbol)
     
     return cached
+
+def get_cached_financials_count():
+    """
+    Cache'de kaç hissenin mali tablosu olduğunu döner.
+    """
+    return len(FINANCIAL_CACHE)

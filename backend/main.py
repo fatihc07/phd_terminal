@@ -10,7 +10,63 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from financial_service import get_stock_financials
+from financial_service import get_stock_financials, get_cached_financials_count
+
+# --- Sektör ve Sektör Grubu Çevirileri ---
+SECTOR_TRANSLATIONS = {
+    "Technology": "Teknoloji",
+    "Financial Services": "Finansal Hizmetler",
+    "Industrials": "Sanayi",
+    "Energy": "Enerji",
+    "Consumer Cyclical": "Tüketici Ürünleri",
+    "Basic Materials": "Temel Maddeler",
+    "Healthcare": "Sağlık",
+    "Communication Services": "İletişim & Ulaştırma",
+    "Real Estate": "Gayrimenkul",
+    "Utilities": "Kamu Hizmetleri",
+    "Consumer Defensive": "Tüketici Savunma",
+    "Financial": "Finans",
+    "Services": "Hizmetler",
+    "Transportation": "Ulaştırma",
+    "Manufacturing": "İmalat",
+    "Conglomerates": "Holdingler"
+}
+
+INDUSTRY_TRANSLATIONS = {
+    "Banks—Regional": "Bankacılık",
+    "Airlines": "Havacılık",
+    "Steel": "Demir Çelik",
+    "Auto Manufacturers": "Otomotiv",
+    "Beverages—Non-Alcoholic": "İçecek",
+    "Beverages—Brewers": "İçecek & Bira",
+    "Retail—Defensive": "Perakende",
+    "Oil & Gas Integrated": "Petrol & Gaz",
+    "Chemicals": "Kimya",
+    "Information Technology Services": "BT Hizmetleri",
+    "Software—Application": "Yazılım",
+    "Communication Equipment": "İletişim Ekipmanları",
+    "Real Estate—Development": "Gayrimenkul Geliştirme",
+    "Insurance—General": "Sigortacılık",
+    "Electricity": "Elektrik Dağıtım",
+    "Textile Manufacturing": "Tekstil",
+    "Food Distribution": "Gıda Dağıtım",
+    "Building Materials": "Yapı Malzemeleri"
+}
+
+def translate_text(text, target_lang='tr'):
+    # Basit bir Google Translate (Unofficial) çağrısı deneyelim
+    if not text or text == "Şirket açıklaması bulunamadı." or len(text) < 10:
+        return text
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&q={requests.utils.quote(text)}"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            result = r.json()
+            translated = "".join([sentence[0] for sentence in result[0]])
+            return translated
+    except:
+        pass
+    return text
 
 # --- Google Finance Scraper (Terminal Testine Göre Optimize Edildi) ---
 # --- YFinance Data Fetcher (Single Source of Truth) ---
@@ -86,22 +142,7 @@ def get_google_finance_data(symbol: str):
                 info = ticker.info
                 fullname = info.get('longName') or info.get('shortName') or original_symbol
                 raw_s = info.get('sector', 'Diğer')
-                
-                # Sektör Çevirisi yapıp cacheleyelim
-                sector_trans = {
-                    "Technology": "Teknoloji & Yazılım",
-                    "Financial Services": "Bankacılık & Finans",
-                    "Industrials": "Sanayi & Üretim",
-                    "Energy": "Enerji",
-                    "Consumer Cyclical": "Perakende & Ticaret",
-                    "Basic Materials": "Madencilik & Metal",
-                    "Healthcare": "Sağlık",
-                    "Communication Services": "Ulaştırma & Havacılık",
-                    "Real Estate": "GYO & İnşaat",
-                    "Utilities": "Enerji & Altyapı",
-                    "Consumer Defensive": "Gıda & İçecek"
-                }
-                sector = sector_trans.get(raw_s, raw_s) # Çeviri
+                sector = SECTOR_TRANSLATIONS.get(raw_s, raw_s) # Çeviri
 
                 # Eğer anlamlı bir sektörse cache'e kaydet
                 if sector != "Diğer":
@@ -207,6 +248,14 @@ def get_online_users():
     t = time.time()
     return [ un for un, la in ONLINE_USERS.items() if t - la < 120 ]
 
+@app.get("/admin/stats")
+def get_admin_stats():
+    return {
+        "cached_financials": get_cached_financials_count(),
+        "total_users": len(USERS_DB),
+        "online_users": len([ un for un, la in ONLINE_USERS.items() if time.time() - la < 120 ])
+    }
+
 @app.get("/stocks")
 def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 3):
     requested = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else []
@@ -264,23 +313,8 @@ def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 3):
                 # sadece gelen 'sector' alanını kullanacağım. 
                 # Eğer yoksa 'Diğer' olarak işaretleyeceğim.
                 
-                # Sektör Çeviri Sözlüğü (Basit)
-                sector_trans = {
-                    "Technology": "Teknoloji & Yazılım",
-                    "Financial Services": "Bankacılık & Finans",
-                    "Industrials": "Sanayi & Üretim",
-                    "Energy": "Enerji",
-                    "Consumer Cyclical": "Perakende & Ticaret",
-                    "Basic Materials": "Madencilik & Metal",
-                    "Healthcare": "Sağlık",
-                    "Communication Services": "Ulaştırma & Havacılık", # Genelde iletişim ama THYAO burada olabiliyor bazen
-                    "Real Estate": "GYO & İnşaat",
-                    "Utilities": "Enerji & Altyapı",
-                    "Consumer Defensive": "Gıda & İçecek"
-                }
-
                 raw_sector = res.get('sector', 'Diğer')
-                res['sector_group'] = sector_trans.get(raw_sector, raw_sector)
+                res['sector_group'] = SECTOR_TRANSLATIONS.get(raw_sector, raw_sector)
                 
                 results_map[futures[f]] = res
 
@@ -344,12 +378,16 @@ def get_stock_detail(symbol: str):
             return info.get(key, default)
 
         # Temel veriler
+        raw_sector = get_val("sector")
+        raw_industry = get_val("industry")
+        raw_description = get_val("longBusinessSummary", "Şirket açıklaması bulunamadı.")
+
         data = {
             "symbol": original_symbol,
             "name": get_val("longName", get_val("shortName")),
-            "description": get_val("longBusinessSummary", "Şirket açıklaması bulunamadı."),
-            "sector": get_val("sector"),
-            "industry": get_val("industry"),
+            "description": translate_text(raw_description),
+            "sector": SECTOR_TRANSLATIONS.get(raw_sector, raw_sector),
+            "industry": INDUSTRY_TRANSLATIONS.get(raw_industry, raw_industry),
             "website": get_val("website"),
             "logo_url": get_val("logo_url", ""), 
             "price": get_val("currentPrice", get_val("regularMarketPrice", 0)),
