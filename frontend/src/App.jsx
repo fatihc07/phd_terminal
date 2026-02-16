@@ -26,6 +26,7 @@ function App() {
   const [users, setUsers] = useState([]);
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [adminStats, setAdminStats] = useState({ cached_financials: 0, total_users: 0, online_users: 0 });
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -80,8 +81,21 @@ function App() {
   useEffect(() => {
     if (activeTab === 'Admin') {
       fetchUsers();
+      fetchAdminStats();
     }
   }, [activeTab]);
+
+  const fetchAdminStats = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/stats`);
+      if (response.ok) {
+        const data = await response.json();
+        setAdminStats(data);
+      }
+    } catch (err) {
+      console.error("Stats fetch error:", err);
+    }
+  };
 
   const handleCreateUser = async (e) => {
     e.preventDefault();
@@ -415,34 +429,48 @@ function App() {
           <div className="admin-view">
             <h1>Admin Paneli</h1>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Kayıtlı kullanıcıları yönetin ve yenilerini ekleyin.</p>
-            
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '2rem' }}>
-              <div className="stock-card">
-                <h3>Yeni Kullanıcı Ekle</h3>
-                <form onSubmit={handleCreateUser} style={{ marginTop: '1rem' }}>
-                  <div className="form-group">
-                    <label>Kullanıcı Adı</label>
-                    <input 
-                      type="text" 
-                      className="search-bar" 
-                      style={{ width: '100%', marginBottom: '1rem' }}
-                      value={newUsername}
-                      onChange={(e) => setNewUsername(e.target.value)}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label>Şifre</label>
-                    <input 
-                      type="password" 
-                      className="search-bar" 
-                      style={{ width: '100%', marginBottom: '1rem' }}
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                    />
-                  </div>
-                  <button type="submit" className="login-btn">Kullanıcıyı Kaydet</button>
-                </form>
-              </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1.5rem', marginBottom: '2rem' }}>
+               <div className="stock-card" style={{ textAlign: 'center', padding: '1.5rem' }}>
+                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>MAALİ TABLOSU ÇEKİLEN HİSSELER</div>
+                 <div style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--accent-color)' }}>{adminStats.cached_financials}</div>
+               </div>
+               <div className="stock-card" style={{ textAlign: 'center', padding: '1.5rem' }}>
+                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>TOPLAM KULLANICI</div>
+                 <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{adminStats.total_users}</div>
+               </div>
+               <div className="stock-card" style={{ textAlign: 'center', padding: '1.5rem' }}>
+                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>ONLİNE KULLANICI</div>
+                 <div style={{ fontSize: '2rem', fontWeight: 'bold', color: '#00ff00' }}>{adminStats.online_users}</div>
+               </div>
+             </div>
+
+             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '2rem' }}>
+               <div className="stock-card">
+                 <h3>Yeni Kullanıcı Ekle</h3>
+                 <form onSubmit={handleCreateUser} style={{ marginTop: '1rem' }}>
+                   <div className="form-group">
+                     <label>Kullanıcı Adı</label>
+                     <input 
+                       type="text" 
+                       className="search-bar" 
+                       style={{ width: '100%', marginBottom: '1rem' }}
+                       value={newUsername}
+                       onChange={(e) => setNewUsername(e.target.value)}
+                     />
+                   </div>
+                   <div className="form-group">
+                     <label>Şifre</label>
+                     <input 
+                       type="password" 
+                       className="search-bar" 
+                       style={{ width: '100%', marginBottom: '1rem' }}
+                       value={newPassword}
+                       onChange={(e) => setNewPassword(e.target.value)}
+                     />
+                   </div>
+                   <button type="submit" className="login-btn">Kullanıcıyı Kaydet</button>
+                 </form>
+               </div>
 
               <div className="stock-table-container">
                 <h3>Kayıtlı Kullanıcılar</h3>
