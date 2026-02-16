@@ -10,6 +10,8 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from financial_service import get_stock_financials
+
 # --- Google Finance Scraper (Terminal Testine Göre Optimize Edildi) ---
 # --- YFinance Data Fetcher (Single Source of Truth) ---
 def get_google_finance_data(symbol: str):
@@ -21,14 +23,14 @@ def get_google_finance_data(symbol: str):
     if "." not in yf_symbol:
         yf_symbol = f"{original_symbol}.IS"
         
+    today_date = time.strftime("%Y-%m-%d")
+
     try:
         ticker = yf.Ticker(yf_symbol)
         
-        # 1. Hacim (Öncelik: fast_info > info > history)
-        # fast_info, anlık hacim konusunda genellikle daha tutarlıdır.
+        # 1. Hacim (Bu kısım aynı kalıyor)
         volume = 0
         try:
-            # last_volume genelde o günün son hacmi/kümülatif hacmidir
             if hasattr(ticker, 'fast_info') and 'last_volume' in ticker.fast_info:
                 volume = float(ticker.fast_info['last_volume'])
         except: pass
@@ -43,7 +45,6 @@ def get_google_finance_data(symbol: str):
         hist = ticker.history(period="5d")
         
         if hist.empty:
-            # Eğer history boşsa ama fast_info'dan hacim geldiyse bile fiyat yok demektir.
             return None
 
         current_row = hist.iloc[-1]
@@ -55,7 +56,6 @@ def get_google_finance_data(symbol: str):
             if vol_hist > 0:
                 volume = vol_hist
             elif len(hist) >= 2:
-                # Bugün veri yoksa dünü al (Piyasa kapalıyken)
                 volume = float(hist['Volume'].iloc[-2])
 
         # 3. Değişim Hesaplama
@@ -73,20 +73,9 @@ def get_google_finance_data(symbol: str):
             if open_price != 0:
                 change_percent = (change / open_price) * 100
 
-        # 4. İsim
+        # 4. İsim ve Sektör (Cache Mekanizması)
         fullname = original_symbol
-        try:
-            # info yukarıda çekildiyse cache'den gelir
-            info = ticker.info
-            fullname = info.get('longName') or info.get('shortName') or original_symbol
-        except: pass
-
-        # Açılış Fiyatı (Bugünün)
-        open_price = 0
-        if not hist.empty:
-            # Son günün açılış verisini al
-            open_price = float(current_row['Open'])
-            
+        
         # Sektör Cache Kontrolü
         cached_sector = SECTOR_CACHE.get(original_symbol)
         if cached_sector:
@@ -120,12 +109,17 @@ def get_google_finance_data(symbol: str):
                     save_sector_cache(SECTOR_CACHE)
              except: pass
 
+        # Açılış Fiyatı (Bugünün)
+        open_price = 0
+        if not hist.empty:
+            open_price = float(current_row['Open'])
+
         return {
             "symbol": original_symbol,
             "name": fullname,
             "sector": sector, # Cache'den gelen veya yeni bulunan
             "price": round(price, 2),
-            "open": round(open_price, 2), # Eklenen veri
+            "open": round(open_price, 2),
             "change": round(change, 2),
             "changePercent": round(change_percent, 2),
             "volume": volume,
@@ -175,6 +169,9 @@ def heartbeat(data: dict = Body(...)):
     if u: ONLINE_USERS[u] = time.time()
     return {"status": "ok"}
 
+    if u: ONLINE_USERS[u] = time.time()
+    return {"status": "ok"}
+
 # --- Sektör Cache Sistemi ---
 SECTOR_DB_FILE = os.path.join(os.path.dirname(__file__), "sectors.json")
 
@@ -211,19 +208,16 @@ def get_online_users():
     return [ un for un, la in ONLINE_USERS.items() if t - la < 120 ]
 
 @app.get("/stocks")
-def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 20):
+def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 3):
     requested = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else []
+    
     defaults = []
     
-    # Dict yapısını düz listeye çevir (Sector bilgisini saklamak için map kullanacağız)
-    sector_map = {}
-    
+    # Dict yapısını düz listeye çevir (Sektör bilgisini yfinance'dan dinamik alacağız)
     if isinstance(DEFAULT_STOCKS, dict):
         for sector, s_list in DEFAULT_STOCKS.items():
             for s in s_list:
-                clean_s = s.replace(".IS", "")
-                defaults.append(clean_s)
-                sector_map[clean_s] = sector
+                defaults.append(s.replace(".IS", ""))
     else:
         # Eski liste yapısı (Fallback)
         defaults = [s.replace(".IS", "") for s in DEFAULT_STOCKS]
@@ -255,14 +249,38 @@ def get_stocks(symbols: Optional[str] = None, page: int = 1, limit: int = 20):
         for f in futures:
             res = f.result()
             if res: 
-                # Sektör bilgisini ekle
-                sym = res['symbol'].replace('.IS', '')
-                res['sector_group'] = sector_map.get(sym, 'Genel')
-                # Eğer yfinance'dan gelen sektör bilgisi varsa onu da kullanabiliriz ama sector_map daha temiz görünüyor frontend için.
-                # Ama frontend'de 'sector' kullanılıyor mu 'sector_group' mu kontrol etmek lazım.
-                # App.jsx: detail.sector ve detail.industry kullanıyor.
-                # DashboardView.jsx: detail.sector_group? Muhtemelen.
-                # Aslında get_google_finance_data zaten 'sector' döndürüyor.
+                # Dinamik Sektör Ekleme
+                # get_google_finance_data fonksiyonu artık yfinance kullanıyor
+                # ancak orada sektör bilgisini henüz çekmiyoruz.
+                # Performansı artırmak için get_google_finance_data içinde sektörü de dönmemiz lazım.
+                # Şimdilik burada hızlıca ticker.info'dan almaya çalışalım,
+                # ama ideal olan get_google_finance_data fonksiyonunu guncellemektir.
+                # Fakat get_google_finance_data zaten bir object dönüyor, burda mudahale edebiliriz.
+                
+                # NOT: Sektör bilgisini get_google_finance_data fonksiyonuna eklemek daha verimli olur.
+                # Ancak hızlı çözüm olarak burada basit bir kontrol yapabiliriz veya
+                # get_google_finance_data'yı güncelleyelim.
+                # Ben aşağıda get_google_finance_data'yı güncelleyeceğim, o yüzden burada
+                # sadece gelen 'sector' alanını kullanacağım. 
+                # Eğer yoksa 'Diğer' olarak işaretleyeceğim.
+                
+                # Sektör Çeviri Sözlüğü (Basit)
+                sector_trans = {
+                    "Technology": "Teknoloji & Yazılım",
+                    "Financial Services": "Bankacılık & Finans",
+                    "Industrials": "Sanayi & Üretim",
+                    "Energy": "Enerji",
+                    "Consumer Cyclical": "Perakende & Ticaret",
+                    "Basic Materials": "Madencilik & Metal",
+                    "Healthcare": "Sağlık",
+                    "Communication Services": "Ulaştırma & Havacılık", # Genelde iletişim ama THYAO burada olabiliyor bazen
+                    "Real Estate": "GYO & İnşaat",
+                    "Utilities": "Enerji & Altyapı",
+                    "Consumer Defensive": "Gıda & İçecek"
+                }
+
+                raw_sector = res.get('sector', 'Diğer')
+                res['sector_group'] = sector_trans.get(raw_sector, raw_sector)
                 
                 results_map[futures[f]] = res
 
@@ -280,16 +298,7 @@ def search_suggestions(q: str):
     
     # 1. Yerel Havuzda Ara (BIST Hisseleri)
     local_matches = []
-    
-    # DEFAULT_STOCKS dict ise düz listeye çevirip ara
-    defaults_flat = []
-    if isinstance(DEFAULT_STOCKS, dict):
-        for s_list in DEFAULT_STOCKS.values():
-            defaults_flat.extend(s_list)
-    else:
-        defaults_flat = DEFAULT_STOCKS
-
-    for s in defaults_flat:
+    for s in DEFAULT_STOCKS:
         if q in s:
             local_matches.append({
                 "symbol": s.replace(".IS", ""),
@@ -334,28 +343,13 @@ def get_stock_detail(symbol: str):
         def get_val(key, default="-"):
             return info.get(key, default)
 
-        # Çeviri Fonksiyonu (Opsiyonel)
-        def tr(text):
-            if not text or text == "-": return text
-            try:
-                # deep_translator yüklü ise kullan
-                # from deep_translator import GoogleTranslator
-                # return GoogleTranslator(source='auto', target='tr').translate(text)
-                return text
-            except Exception:
-                return text
-
-        description = get_val("longBusinessSummary", "Şirket açıklaması bulunamadı.")
-        sector = get_val("sector")
-        industry = get_val("industry")
-
         # Temel veriler
         data = {
             "symbol": original_symbol,
             "name": get_val("longName", get_val("shortName")),
-            "description": tr(description) if description != "Şirket açıklaması bulunamadı." else description,
-            "sector": tr(sector),
-            "industry": tr(industry),
+            "description": get_val("longBusinessSummary", "Şirket açıklaması bulunamadı."),
+            "sector": get_val("sector"),
+            "industry": get_val("industry"),
             "website": get_val("website"),
             "logo_url": get_val("logo_url", ""), 
             "price": get_val("currentPrice", get_val("regularMarketPrice", 0)),
@@ -389,39 +383,55 @@ def get_stock_detail(symbol: str):
         print(f"Detail error: {e}")
         raise HTTPException(status_code=404, detail="Hisse detayları alınamadı")
 
-import financial_service
-
 @app.get("/stocks/{symbol}/financials")
-def get_financials(symbol: str, refresh: bool = False):
-    original_symbol = symbol.upper().replace(".IS", "")
-    
-    # Check cache first if refresh is not requested
-    if not refresh:
-        data = financial_service.get_stored_financials(original_symbol)
-        if data:
-            return data
-            
-    try:
-        data = financial_service.fetch_financial_data(original_symbol)
-        return data or {}
-    except Exception as e:
-        print(f"Financial fetch error: {e}")
-        return {}
+def get_financials(symbol: str):
+    data = get_stock_financials(symbol)
+    if not data:
+        raise HTTPException(status_code=404, detail="Mali tablolar bulunamadı")
+    return data
 
-# Sektörel Gruplandırma
-DEFAULT_STOCKS = {
-    "Bankacılık & Finans": ["AKBNK.IS", "GARAN.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS", "HALKB.IS", "TSKB.IS", "SKBNK.IS", "ALBRK.IS", "ICBCT.IS", "QNBFL.IS"],
-    "Sanayi & Üretim": ["EREGL.IS", "KRDMD.IS", "TUPRS.IS", "PETKM.IS", "SISE.IS", "ARCLK.IS", "VESTL.IS", "TOASO.IS", "FROTO.IS", "TTRAK.IS", "OTKAR.IS", "KCHOL.IS", "SAHOL.IS", "ULKER.IS", "AEFES.IS", "CCOLA.IS", "BRISA.IS", "SASA.IS", "HEKTS.IS"],
-    "Teknoloji & Yazılım": ["ASELS.IS", "LOGO.IS", "NETAS.IS", "KFEIN.IS", "ALCTL.IS", "KAREL.IS", "KRONT.IS", "LINK.IS", "MIA.IS", "ARDYZ.IS", "FONET.IS", "SMART.IS", "VBTYZ.IS", "PAPIL.IS", "ESCOM.IS", "AZTEK.IS", "MIATK.IS", "KONTR.IS", "YEOTK.IS", "SDTTR.IS", "EUPWR.IS", "ASTOR.IS", "CVKMD.IS", "CWENE.IS"],
-    "Enerji": ["ZOREN.IS", "ODAS.IS", "AKSEN.IS", "AYDEM.IS", "ENJSA.IS", "GWIND.IS", "NATEN.IS", "MAGEN.IS", "BIOEN.IS", "CONSE.IS", "SMRTG.IS", "ALFAS.IS", "AHGAZ.IS", "AKENR.IS", "AYEN.IS"],
-    "Ulaştırma & Havacılık": ["THYAO.IS", "PGSUS.IS", "TAVHL.IS", "CLEBI.IS", "DOCO.IS", "RYSAS.IS", "TLMAN.IS"],
-    "GYO & İnşaat": ["EKGYO.IS", "ISGYO.IS", "TRGYO.IS", "SNGYO.IS", "ALGYO.IS", "HLGYO.IS", "OZKGY.IS", "AKFGY.IS", "RYGYO.IS", "ENKAI.IS", "TKFEN.IS"],
-    "Perakende & Ticaret": ["BIMAS.IS", "MGROS.IS", "SOKM.IS", "TKNSA.IS", "MAVI.IS", "YATAS.IS", "VAKKO.IS", "BOYP.IS", "BIZIM.IS"],
-    "Madencilik & Metal": ["KOZAL.IS", "KOZAA.IS", "IPEKE.IS", "ALTNY.IS", "CVKMD.IS", "PARSN.IS", "DMSAS.IS", "CEMTS.IS"],
-    "Diğer": ["GUBRF.IS", "BERA.IS", "IHLAS.IS", "METRO.IS", "FENER.IS", "GSRAY.IS", "BJKAS.IS", "TSPOR.IS"]
-}
+DEFAULT_STOCKS = [
+    "A1CAP.IS", "ACSEL.IS", "ADEL.IS", "ADESE.IS", "ADGYO.IS", "AEFES.IS", "AFYON.IS", "AGESA.IS", "AGHOL.IS", "AGYO.IS", "AHGAZ.IS", "AKBNK.IS", "AKCNS.IS", "AKENR.IS", "AKFGY.IS", "AKFYE.IS", "AKGRT.IS", "AKMGY.IS", "AKSA.IS", "AKSEN.IS", "AKSGY.IS", "AKSUE.IS", "AKYHO.IS", "ALARK.IS", "ALBRK.IS", "ALCAR.IS", "ALCTL.IS", "ALFAS.IS", "ALGYO.IS", "ALKA.IS", "ALKIM.IS", "ALMAD.IS",
+    "ALPF.IS", "ALTNY.IS", "ANELE.IS", "ANGEN.IS", "ANHYT.IS", "ANSGR.IS", "ARASE.IS", "ARCLK.IS", "ARDYZ.IS", "ARENA.IS", "ARSAN.IS", "ARTMS.IS", "ARZUM.IS", "ASELS.IS", "ASGYO.IS", "ASTOR.IS", "ASUZU.IS", "ATAGY.IS", "ATAKP.IS", "ATP.IS", "AVGYO.IS", "AVHOL.IS", "AVOD.IS", "AVPGY.IS", "AYCES.IS", "AYDEM.IS", "AYEN.IS", "AYES.IS", "AYGAZ.IS", "AZTEK.IS",
+    "BAGFS.IS", "BAKAB.IS", "BALAT.IS", "BANVT.IS", "BARMA.IS", "BASCM.IS", "BASGZ.IS", "BAYRK.IS", "BEGYO.IS", "BERA.IS", "BEYAZ.IS", "BFREN.IS", "BIENY.IS", "BIGCH.IS", "BIMAS.IS", "BINHO.IS", "BIOEN.IS", "BIZIM.IS", "BJKAS.IS", "BLCYT.IS", "BMSCH.IS", "BMSTL.IS", "BNTAS.IS", "BOBET.IS", "BOSSA.IS", "BRISA.IS", "BRKO.IS", "BRKSN.IS", "BRKVY.IS", "BRLSM.IS", "BRMEN.IS", "BRSAN.IS", "BRYAT.IS", "BSOKE.IS", "BTCIM.IS", "BUCIM.IS", "BURCE.IS", "BURVA.IS", "BVSAN.IS",
+    "CANTE.IS", "CASA.IS", "CATES.IS", "CCOLA.IS", "CELHA.IS", "CEMAS.IS", "CEMTS.IS", "CEOEM.IS", "CIMSA.IS", "CLEBI.IS", "CMBTN.IS", "CMENT.IS", "CONSE.IS", "COSMO.IS", "CRDFA.IS", "CRFSA.IS", "CUSAN.IS", "CVKMD.IS", "CWENE.IS",
+    "DAGHL.IS", "DAGI.IS", "DAPGM.IS", "DARDL.IS", "DENGE.IS", "DERHL.IS", "DERIM.IS", "DESA.IS", "DESPC.IS", "DEVA.IS", "DGATE.IS", "DGGYO.IS", "DGNMO.IS", "DIRIT.IS", "DITAS.IS", "DMSAS.IS", "DNISI.IS", "DOAS.IS", "DOBUR.IS", "DOCO.IS", "DOGUB.IS", "DOHOL.IS", "DOKTA.IS", "DURDO.IS", "DYOBY.IS", "DZGYO.IS",
+    "EBEBK.IS", "ECILC.IS", "ECZYT.IS", "EDATA.IS", "EDIP.IS", "EGEEN.IS", "EGGUB.IS", "EGPRO.IS", "EGSER.IS", "EKGYO.IS", "EKIZ.IS", "EKSUN.IS", "ELITE.IS", "EMKEL.IS", "EMNIS.IS", "ENJSA.IS", "ENKAI.IS", "ENSRI.IS", "EPLAS.IS", "ERBOS.IS", "ERCB.IS", "EREGL.IS", "ERSU.IS", "ESCAR.IS", "ESCOM.IS", "ESEN.IS", "ETILR.IS", "ETYAT.IS", "EUHOL.IS", "EUKYO.IS", "EUPWR.IS", "EUREN.IS", "EUYO.IS", "EYGYO.IS",
+    "FADE.IS", "FENER.IS", "FLAP.IS", "FMIZP.IS", "FONET.IS", "FORMT.IS", "FORTE.IS", "FRIGO.IS", "FROTO.IS", "FZLGY.IS",
+    "GARAN.IS", "GARFA.IS", "GEDIK.IS", "GEDZA.IS", "GENIL.IS", "GENTS.IS", "GEREL.IS", "GESAN.IS", "GLBMD.IS", "GLCVY.IS", "GLRYH.IS", "GLYHO.IS", "GMTAS.IS", "GOKNR.IS", "GOLTS.IS", "GOODY.IS", "GOZDE.IS", "GRNYO.IS", "GRSEL.IS", "GRTRK.IS", "GSDDE.IS", "GSDHO.IS", "GSRAY.IS", "GUBRF.IS", "GWIND.IS", "GZNMI.IS",
+    "HALKB.IS", "HATEK.IS", "HDFGS.IS", "HEDEF.IS", "HEKTS.IS", "HKTM.IS", "HLGYO.IS", "HTTBT.IS", "HUBVC.IS", "HUNER.IS", "HURGZ.IS",
+    "ICBCT.IS", "IDEAS.IS", "IDGYO.IS", "IEYHO.IS", "IHEVA.IS", "IHGZT.IS", "IHLAS.IS", "IHLGM.IS", "IHYAY.IS", "IMASM.IS", "INDES.IS", "INFO.IS", "INGRM.IS", "INTEM.IS", "INVEO.IS", "INVES.IS", "IPEKE.IS", "ISATR.IS", "ISBIR.IS", "ISBTR.IS", "ISCTR.IS", "ISDMR.IS", "ISFIN.IS", "ISGSY.IS", "ISGYO.IS", "ISKPL.IS", "ISKUR.IS", "ISMEN.IS", "ISSEN.IS", "IZENR.IS", "IZFAS.IS", "IZINV.IS", "IZMDC.IS",
+    "JANTS.IS",
+]
+# BIST 500+ Hisseleri (Tek Liste)
+ALL_BIST_STOCKS = [
+    "A1CAP.IS", "ACSEL.IS", "ADEL.IS", "ADESE.IS", "ADGYO.IS", "AEFES.IS", "AFYON.IS", "AGESA.IS", "AGHOL.IS", "AGYO.IS", "AHGAZ.IS", "AKBNK.IS", "AKCNS.IS", "AKENR.IS", "AKFGY.IS", "AKGRT.IS", "AKMGY.IS", "AKSA.IS", "AKSEN.IS", "AKSGY.IS", "AKSUE.IS", "AKYHO.IS", "ALARK.IS", "ALBRK.IS", "ALCAR.IS", "ALCTL.IS", "ALFAS.IS", "ALGYO.IS", "ALKA.IS", "ALKIM.IS", "ALMAD.IS", "ALTNY.IS", "ANELE.IS", "ANGEN.IS", "ANHYT.IS", "ANSGR.IS", "ARASE.IS", "ARCLK.IS", "ARDYZ.IS", "ARENA.IS", "ARSAN.IS", "ARZUM.IS", "ASELS.IS", "ASGYO.IS", "ASTOR.IS", "ASUZU.IS", "ATAGY.IS", "ATAKP.IS", "ATLAS.IS", "ATPTP.IS", "AVGYO.IS", "AVHOL.IS", "AVOD.IS", "AVTUR.IS", "AYCES.IS", "AYDEM.IS", "AYEN.IS", "AYES.IS", "AYGAZ.IS", "AZTEK.IS",
+    "BAGFS.IS", "BAKAB.IS", "BALAT.IS", "BANVT.IS", "BARMA.IS", "BASCM.IS", "BASGZ.IS", "BAYRK.IS", "BEGYO.IS", "BERA.IS", "BERK.IS", "BEYAZ.IS", "BFREN.IS", "BIENY.IS", "BIGCH.IS", "BIMAS.IS", "BIOEN.IS", "BIZIM.IS", "BJKAS.IS", "BLCYT.IS", "BMSCH.IS", "BMSTL.IS", "BNTAS.IS", "BOBET.IS", "BOSSA.IS", "BRISA.IS", "BRKO.IS", "BRKSN.IS", "BRKV.IS", "BRLSM.IS", "BRMEN.IS", "BRSAN.IS", "BRYAT.IS", "BSOKE.IS", "BTCIM.IS", "BUCIM.IS", "BURCE.IS", "BURVA.IS", "BVSAN.IS",
+    "CANTE.IS", "CASA.IS", "CCOLA.IS", "CELHA.IS", "CEMAS.IS", "CEMTS.IS", "CEOEM.IS", "CIMSA.IS", "CLEBI.IS", "CMBTN.IS", "CMENT.IS", "CONSE.IS", "COSMO.IS", "CRDFA.IS", "CRFSA.IS", "CUSAN.IS", "CVKMD.IS", "CWENE.IS",
+    "DAGHL.IS", "DAGI.IS", "DAPGM.IS", "DARDL.IS", "DENGE.IS", "DERHL.IS", "DERIM.IS", "DESA.IS", "DESPC.IS", "DEVA.IS", "DGATE.IS", "DGGYO.IS", "DGNMO.IS", "DIRIT.IS", "DITAS.IS", "DMSAS.IS", "DNISI.IS", "DOAS.IS", "DOBUR.IS", "DOCO.IS", "DOGUB.IS", "DOHOL.IS", "DOKTA.IS", "DURDO.IS", "DYOBY.IS", "DZGYO.IS",
+    "EBEBK.IS", "ECILC.IS", "ECZYT.IS", "EDATA.IS", "EDIP.IS", "EGEEN.IS", "EGGUB.IS", "EGPRO.IS", "EGSER.IS", "EKGYO.IS", "EKIZ.IS", "EKSUN.IS", "ELITE.IS", "EMKEL.IS", "EMNIS.IS", "ENJSA.IS", "ENKAI.IS", "ENSRI.IS", "EPLAS.IS", "ERBOS.IS", "ERCB.IS", "EREGL.IS", "ERSU.IS", "ESCAR.IS", "ESCOM.IS", "ESEN.IS", "ETILR.IS", "ETYAT.IS", "EUHOL.IS", "EUKYO.IS", "EUPWR.IS", "EUREN.IS", "EUYO.IS", "EYGYO.IS",
+    "FADE.IS", "FENER.IS", "FLAP.IS", "FMIZP.IS", "FONET.IS", "FORMT.IS", "FRIGO.IS", "FROTO.IS", "FZLGY.IS",
+    "GARAN.IS", "GARFA.IS", "GEDIK.IS", "GEDZA.IS", "GENIL.IS", "GENTS.IS", "GEREL.IS", "GESAN.IS", "GLBMD.IS", "GLCVY.IS", "GLRYH.IS", "GLYHO.IS", "GMTAS.IS", "GOKNR.IS", "GOLTS.IS", "GOODY.IS", "GOZDE.IS", "GRNYO.IS", "GRSEL.IS", "GSDDE.IS", "GSDHO.IS", "GSRAY.IS", "GUBRF.IS", "GWIND.IS", "GZNMI.IS",
+    "HALKB.IS", "HATEK.IS", "HDFGS.IS", "HEDEF.IS", "HEKTS.IS", "HKTM.IS", "HLGYO.IS", "HTTBT.IS", "HUBVC.IS", "HUNER.IS", "HURGZ.IS",
+    "ICBCT.IS", "IDEAS.IS", "IDGYO.IS", "IEYHO.IS", "IHEVA.IS", "IHGZT.IS", "IHLAS.IS", "IHLGM.IS", "IHYAY.IS", "IMASM.IS", "INDES.IS", "INFO.IS", "INGRM.IS", "INTEM.IS", "INVEO.IS", "INVES.IS", "IPEKE.IS", "ISATR.IS", "ISBIR.IS", "ISBTR.IS", "ISCTR.IS", "ISDMR.IS", "ISFIN.IS", "ISGSY.IS", "ISGYO.IS", "ISKPL.IS", "ISKUR.IS", "ISMEN.IS", "ISSEN.IS", "IZENR.IS", "IZFAS.IS", "IZINV.IS", "IZMDC.IS",
+    "JANTS.IS",
+    "KAPLM.IS", "KAREL.IS", "KARSN.IS", "KARTN.IS", "KARYE.IS", "KATMR.IS", "KAYSE.IS", "KCAER.IS", "KCHOL.IS", "KENT.IS", "KERVN.IS", "KERVT.IS", "KFEIN.IS", "KGYO.IS", "KIMMR.IS", "KLGYO.IS", "KLKIM.IS", "KLMSN.IS", "KLNMA.IS", "KLRHO.IS", "KMPUR.IS", "KNFRT.IS", "KONKA.IS", "KONTR.IS", "KONYA.IS", "KOPOL.IS", "KORDS.IS", "KOZAA.IS", "KOZAL.IS", "KRDMA.IS", "KRDMB.IS", "KRDMD.IS", "KRGYO.IS", "KRONT.IS", "KRPLS.IS", "KRSTL.IS", "KRTEK.IS", "KRVGD.IS", "KSTUR.IS", "KTLEV.IS", "KTSKR.IS", "KUTPO.IS", "KUYAS.IS",
+    "LIDER.IS", "LIDFA.IS", "LINK.IS", "LKMNH.IS", "LOGO.IS", "LUKSK.IS",
+    "MAALT.IS", "MACKO.IS", "MAGEN.IS", "MAKIM.IS", "MAKTK.IS", "MANAS.IS", "MARKA.IS", "MARTI.IS", "MAVI.IS", "MEDTR.IS", "MEGAP.IS", "MEGMT.IS", "MEKAG.IS", "MEPET.IS", "MERCN.IS", "MERIT.IS", "MERKO.IS", "METRO.IS", "METUR.IS", "MGROS.IS", "MIATK.IS", "MIPAZ.IS", "MMCAS.IS", "MNDRS.IS", "MNDTR.IS", "MOBTL.IS", "MPARK.IS", "MRGYO.IS", "MRSHL.IS", "MSGYO.IS", "MTRKS.IS", "MTRYO.IS", "MZHLD.IS",
+    "NATEN.IS", "NETAS.IS", "NIBAS.IS", "NTGAZ.IS", "NTHOL.IS", "NUGYO.IS", "NUHCM.IS",
+    "OBAMS.IS", "ODAS.IS", "OFSYM.IS", "ONCSM.IS", "ORCAY.IS", "ORGE.IS", "ORMA.IS", "OSMEN.IS", "OSTIM.IS", "OTKAR.IS", "OTTO.IS", "OYAKC.IS", "OYAYO.IS", "OYLUM.IS", "OYYAT.IS", "OZGYO.IS", "OZKGY.IS", "OZRDN.IS", "OZSUB.IS",
+    "PAGYO.IS", "PAMEL.IS", "PAPIL.IS", "PARSN.IS", "PASEU.IS", "PCILT.IS", "PEGYO.IS", "PEKGY.IS", "PENGD.IS", "PENTA.IS", "PETKM.IS", "PETUN.IS", "PGSUS.IS", "PINSU.IS", "PKART.IS", "PKENT.IS", "PLAT.IS", "PNLSN.IS", "PNSUT.IS", "POLHO.IS", "POLTK.IS", "PRDGS.IS", "PRKAB.IS", "PRKME.IS", "PRZMA.IS", "PSDTC.IS", "PSGYO.IS", "PYMD.IS",
+    "QNBFL.IS", "QUAGR.IS",
+    "RALYH.IS", "RAYSG.IS", "RNPOL.IS", "RODRG.IS", "ROYAL.IS", "RTALB.IS", "RUBNS.IS", "RYGYO.IS", "RYSAS.IS",
+    "SAHOL.IS", "SAMAT.IS", "SANEL.IS", "SANFM.IS", "SANKO.IS", "SARKY.IS", "SASA.IS", "SAYAS.IS", "SDTTR.IS", "SEKFK.IS", "SEKUR.IS", "SELEC.IS", "SELGD.IS", "SELVA.IS", "SEYKM.IS", "SILVR.IS", "SISE.IS", "SKBNK.IS", "SKTAS.IS", "SMART.IS", "SMRTG.IS", "SNGYO.IS", "SNKRN.IS", "SNPAM.IS", "SODSN.IS", "SOKE.IS", "SOKM.IS", "SONME.IS", "SRVGY.IS", "SUMAS.IS", "SUNTK.IS", "SURGY.IS", "SUWEN.IS",
+    "TABGD.IS", "TARKM.IS", "TATEN.IS", "TATGD.IS", "TAVHL.IS", "TBORG.IS", "TCELL.IS", "TDGYO.IS", "TEKTU.IS", "TERA.IS", "TETMT.IS", "TEZOL.IS", "TGSAS.IS", "THYAO.IS", "TKFEN.IS", "TKNSA.IS", "TLMAN.IS", "TMPOL.IS", "TMSN.IS", "TNZTP.IS", "TOASO.IS", "TRCAS.IS", "TRGYO.IS", "TRILC.IS", "TSGYO.IS", "TSKB.IS", "TSPOR.IS", "TTKOM.IS", "TTRAK.IS", "TUCLK.IS", "TUKAS.IS", "TUPRS.IS", "TURGG.IS", "TURSG.IS", "UFUK.IS",
+    "ULAS.IS", "ULKER.IS", "ULUFA.IS", "ULUSE.IS", "ULUUN.IS", "UMPAS.IS", "UNLU.IS", "USAK.IS", "UYUM.IS", "UZERB.IS",
+    "VAKBN.IS", "VAKFN.IS", "VAKKO.IS", "VANGD.IS", "VBTYZ.IS", "VERTU.IS", "VERUS.IS", "VESBE.IS", "VESTL.IS", "VKFYO.IS", "VKGYO.IS", "VKING.IS",
+    "YAPRK.IS", "YATAS.IS", "YAYLA.IS", "YEOTK.IS", "YESIL.IS", "YGGYO.IS", "YGGCY.IS", "YGYO.IS", "YKBNK.IS", "YKSLN.IS", "YONGA.IS", "YUNSA.IS", "YYAPI.IS",
+    "ZEDUR.IS", "ZOREN.IS", "ZRGYO.IS"
+]
 
-# Sektörel Grulandırma İçin Bekleme
+# Sektörel Gruplandırma İçin Bekleme
 # Bu fonksiyon arka planda sektörleri tarayıp cache'i dolduracak
 import threading
 def init_stock_cache():
@@ -436,15 +446,7 @@ def init_stock_cache():
 
     # Thread Pool ile Hızlıca Tarama (Rate Limit İçin Yavaşlatıldı)
     with ThreadPoolExecutor(max_workers=3) as executor:
-         # Dict struct düzeltme
-        defaults_flat = []
-        if isinstance(DEFAULT_STOCKS, dict):
-            for s_list in DEFAULT_STOCKS.values():
-                defaults_flat.extend(s_list)
-        else:
-            defaults_flat = DEFAULT_STOCKS
-            
-        for symbol in defaults_flat:
+        for symbol in ALL_BIST_STOCKS:
             executor.submit(fetch_sector_only, symbol)
             time.sleep(2) # Her istek arası 2 saniye bekle
     
@@ -453,6 +455,9 @@ def init_stock_cache():
 
 # Uygulama Başlarken Cache'i Başlat
 threading.Thread(target=init_stock_cache, daemon=True).start()
+
+# Frontend Tarafından Kullanılan Default Stocks (Artık Dinamik)
+DEFAULT_STOCKS = ALL_BIST_STOCKS
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

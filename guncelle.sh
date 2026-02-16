@@ -1,4 +1,4 @@
-#!/bin/bash
+s#!/bin/bash
 
 echo "♻️  Ecos Otomatik Güncelleme Aracı Başlatılıyor..."
 echo "------------------------------------------------"

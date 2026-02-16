@@ -1,309 +1,652 @@
-
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import './index.css';
 
-const API_BASE_URL = 'http://localhost:8000'; // Or your deployed backend URL
+const APP_VERSION = 'v1.0.3'; // HER GÜNCELLEMEDE ARTIR
+const API_BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
 
 function App() {
-  const [activeView, setActiveView] = useState('dashboard');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
   const [stocks, setStocks] = useState([]);
-  const [loadingStocks, setLoadingStocks] = useState(false);
-  const [hasMoreStocks, setHasMoreStocks] = useState(true);
-  const [page, setPage] = useState(1);
-  const [selectedStock, setSelectedStock] = useState(null);
-  const [favorites, setFavorites] = useState([]);
-
-  // Login State
+  const [loading, setLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [activeTab, setActiveTab] = useState('Dashboard');
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [suggestions, setSuggestions] = useState([]); // Arama önerileri
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [trackedSymbols, setTrackedSymbols] = useState([]); // Kullanıcının aradığı hisseler
+  const [favoriteSymbols, setFavoriteSymbols] = useState([]); // Favori hisseler
+  
+  // Auth Form State
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [loginError, setLoginError] = useState('');
+  const [authError, setAuthError] = useState('');
 
-  // Search State
-  const [searchTerm, setSearchTerm] = useState('');
-  const [searchSuggestions, setSearchSuggestions] = useState([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  // Admin State
+  const [users, setUsers] = useState([]);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
 
-  // Online Panel State
-  const [onlineUsers, setOnlineUsers] = useState([]);
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${API_BASE_URL}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setIsLoggedIn(true);
+        setUser(data.user);
+        localStorage.setItem('storedUser', data.user); // Oturumu kalıcı kaydet
+        setAuthError('');
+      } else {
+        setAuthError('Hatalı kullanıcı adı veya şifre');
+      }
+    } catch (err) {
+      setAuthError('Sunucu bağlantı hatası');
+    }
+  };
 
+  // Sayfa Yenilendiğinde Oturumu Kontrol Et
   useEffect(() => {
-    // Load favorites from local storage
-    const savedFavs = localStorage.getItem('ecos_favorites');
-    if (savedFavs) setFavorites(JSON.parse(savedFavs));
-    
-    // Check if user is logged in (basic session)
-    const savedUser = localStorage.getItem('ecos_user');
-    if (savedUser) setUser(savedUser);
+    const storedUser = localStorage.getItem('storedUser');
+    if (storedUser) {
+        setUser(storedUser);
+        setIsLoggedIn(true);
+    }
   }, []);
 
+  const fetchUsers = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/users`);
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          setUsers(data);
+        } else {
+          console.error("Beklenmeyen veri formatı:", data);
+          setUsers([]);
+        }
+      } else {
+        console.error("Kullanıcı listesi alınamadı:", response.status);
+      }
+    } catch (err) {
+      console.error("User fetch error:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'Admin') {
+      fetchUsers();
+    }
+  }, [activeTab]);
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/create-user`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: newUsername, password: newPassword })
+      });
+      
+      if (response.ok) {
+        alert('Kullanıcı oluşturuldu!');
+        setNewUsername('');
+        setNewPassword('');
+        fetchUsers();
+      } else {
+        alert('Kullanıcı oluşturulamadı. Lütfen sunucunun güncel olduğundan emin olun.');
+      }
+    } catch (err) {
+      alert('Sunucu hatası oluştu');
+    }
+  };
+
+  useEffect(() => {
+    if (!isLoggedIn || !user) return;
+    
+    const sendHeartbeat = async () => {
+      try {
+        await fetch(`${API_BASE_URL}/heartbeat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: user })
+        });
+      } catch (err) {}
+    };
+
+    const fetchOnlineUsers = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/admin/online-users`);
+        const data = await response.json();
+        setOnlineUsers(data);
+      } catch (err) {}
+    };
+
+    sendHeartbeat();
+    fetchOnlineUsers();
+
+    const hInterval = setInterval(sendHeartbeat, 30000);
+    const oInterval = setInterval(fetchOnlineUsers, 10000);
+
+    return () => {
+      clearInterval(hInterval);
+      clearInterval(oInterval);
+    };
+  }, [isLoggedIn, user]);
+
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const observerTarget = React.useRef(null);
+  const [activeStock, setActiveStock] = useState(null); // Detay görünümü için seçili hisse
+
+  // ... (Login ve User Fetch kodları aynı)
+
+  // Stokları Çekme (Sayfalı)
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    
+    const fetchStocks = async () => {
+      // Eğer sayfa 1 ise yükleniyor göster, değilse background yükleme
+      if (page === 1) setLoading(true);
+      
+      try {
+        const symbolsParam = '';
+        const limit = 15;
+        const response = await fetch(`${API_BASE_URL}/stocks?page=${page}&limit=${limit}${symbolsParam}`);
+        const result = await response.json();
+        
+        // Yeni backend yapısı: { items: [], has_more: true/false }
+        // Eski yapı (array) gelirse diye fallback
+        const data = Array.isArray(result) ? result : (result.items || []);
+        const serverHasMore = result.has_more !== undefined ? result.has_more : (data.length >= limit);
+
+        setHasMore(serverHasMore);
+
+        setStocks(prev => {
+          if (page === 1) return data;
+          
+          // Duplicate kontrolü
+          const newStocks = [...prev];
+          data.forEach(item => {
+            if (!newStocks.find(s => s.symbol === item.symbol)) {
+              newStocks.push(item);
+            }
+          });
+          return newStocks;
+        });
+        
+        setLoading(false);
+      } catch (error) {
+        console.error("API Error:", error);
+        setLoading(false);
+      }
+    };
+
+    fetchStocks();
+  }, [isLoggedIn, page, trackedSymbols]); // page değişince tetiklenir
+
+  // Infinite Scroll Observer
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0].isIntersecting && hasMore && !loading) {
+           setPage(prev => prev + 1);
+        }
+      },
+      { threshold: 1.0 }
+    );
+
+    if (observerTarget.current) {
+      observer.observe(observerTarget.current);
+    }
+
+    return () => {
+      if (observerTarget.current) {
+        observer.unobserve(observerTarget.current);
+      }
+    };
+  }, [hasMore, loading]);
+
+
+  // Manuel Arama Reset
+  const handleManualSearch = async (forcedSymbol = null) => {
+    const targetSymbol = forcedSymbol || searchTerm.trim();
+    if (!targetSymbol) return;
+    
+    // Aramada sayfayı başa sar ve arananı tracked'e ekle
+    setPage(1);
+    setHasMore(true);
+    
+    const symbol = targetSymbol.toUpperCase();
+    setShowSuggestions(false);
+    
+    setTrackedSymbols(prev => {
+        const cleanSymbol = symbol.replace('.IS', ''); // Temizle
+        const filtered = prev.filter(s => s !== cleanSymbol && s !== symbol);
+        return [cleanSymbol, ...filtered].slice(0, 20);
+    });
+    setSearchTerm('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+
+  // Favoriler Yükleme
   useEffect(() => {
     if (user) {
-        fetchStocks();
-        // Start Heartbeat
-        const interval = setInterval(() => {
-            fetch(`${API_BASE_URL}/heartbeat`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ username: user })
-            }).catch(() => {});
-            
-            // Fetch online users
-            fetch(`${API_BASE_URL}/admin/online-users`)
-                .then(r => r.json())
-                .then(data => setOnlineUsers(data))
-                .catch(() => {});
-        }, 5000);
-        return () => clearInterval(interval);
+      const savedFavs = localStorage.getItem(`favorite_symbols_${user}`);
+      if (savedFavs) {
+        try {
+          setFavoriteSymbols(JSON.parse(savedFavs));
+        } catch (e) {
+          console.error("Favoriler yüklenemedi", e);
+          setFavoriteSymbols([]);
+        }
+      }
     }
   }, [user]);
 
-  const fetchStocks = async (pageNum = 1) => {
-      setLoadingStocks(true);
-      try {
-          // If searching, send symbols
-          let url = `${API_BASE_URL}/stocks?page=${pageNum}&limit=20`;
-          
-          const res = await fetch(url);
-          const data = await res.json();
-          
-          if (pageNum === 1) {
-              setStocks(data.items);
-          } else {
-              setStocks(prev => [...prev, ...data.items]);
-          }
-          setHasMoreStocks(data.has_more);
-          setPage(pageNum);
-      } catch (e) {
-          console.error(e);
-      }
-      setLoadingStocks(false);
-  };
+  // Favoriler Kaydetme
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem(`favorite_symbols_${user}`, JSON.stringify(favoriteSymbols));
+    }
+  }, [favoriteSymbols, user]);
 
-  const handleLogin = async (e) => {
-      e.preventDefault();
-      try {
-          const res = await fetch(`${API_BASE_URL}/login`, {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ username, password })
-          });
-          if (res.ok) {
-              const data = await res.json();
-              setUser(data.user);
-              localStorage.setItem('ecos_user', data.user);
-              setLoginError('');
-          } else {
-              setLoginError('Hatalı kullanıcı adı veya şifre');
-          }
-      } catch (e) {
-          setLoginError('Sunucu hatası');
-      }
-  };
-
-  const logout = () => {
-      setUser(null);
-      localStorage.removeItem('ecos_user');
-      setActiveView('dashboard');
-  };
-
+  // Favori Ekle/Çıkar
   const toggleFavorite = (symbol, e) => {
-      e?.stopPropagation();
-      let newFavs;
-      if (favorites.includes(symbol)) {
-          newFavs = favorites.filter(s => s !== symbol);
+    if(e) e.stopPropagation();
+    setFavoriteSymbols(prev => {
+      if (prev.includes(symbol)) {
+        return prev.filter(s => s !== symbol);
       } else {
-          newFavs = [...favorites, symbol];
+        return [...prev, symbol];
       }
-      setFavorites(newFavs);
-      localStorage.setItem('ecos_favorites', JSON.stringify(newFavs));
+    });
   };
 
-  const handleSearch = async (val) => {
-      setSearchTerm(val);
-      if (val.length >= 2) {
-          try {
-              const res = await fetch(`${API_BASE_URL}/search/suggestions?q=${val}`);
-              if (res.ok) {
-                  const data = await res.json();
-                  setSearchSuggestions(data);
-                  setShowSuggestions(true);
-              }
-          } catch(e) {}
-      } else {
-          setSearchSuggestions([]);
-          setShowSuggestions(false);
-      }
-  };
-  
-  const selectSuggestion = (s) => {
-      setSearchTerm('');
-      setShowSuggestions(false);
-      // For simplicity, just open detail view immediately if clicked
-      setSelectedStock(s.symbol);
-      setActiveView('detail');
+  const getDisplayStocks = () => {
+    let source = stocks || [];
+    
+    // Eğer favoriler sekmesindeysek sadece favorileri filtrele
+    if (activeTab === 'Favorites') {
+      source = source.filter(s => favoriteSymbols.includes(s.symbol));
+    }
+
+    return source.filter(stock => 
+      stock && stock.symbol && (
+        stock.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (stock.name && stock.name.toLowerCase().includes(searchTerm.toLowerCase()))
+      )
+    );
   };
 
-  if (!user) {
-      return (
-          <div className="login-container">
-              <div className="login-box fade-in">
-                  <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-                      <h1 className="logo" style={{ fontSize: '3rem', marginBottom: '1rem' }}>ECOS</h1>
-                      <p style={{ color: 'var(--text-secondary)' }}>Finansal Terminale Giriş</p>
-                  </div>
-                  <form onSubmit={handleLogin}>
-                      <div className="form-group" style={{ marginBottom: '1.5rem' }}>
-                          <label>Kullanıcı Adı</label>
-                          <input 
-                              type="text" 
-                              className="search-bar" 
-                              style={{ width: '100%' }}
-                              value={username}
-                              onChange={e => setUsername(e.target.value)}
-                          />
-                      </div>
-                      <div className="form-group">
-                          <label>Şifre</label>
-                          <input 
-                              type="password" 
-                              className="search-bar" 
-                              style={{ width: '100%' }}
-                              value={password}
-                              onChange={e => setPassword(e.target.value)}
-                          />
-                      </div>
-                      {loginError && <p style={{ color: 'var(--loss-color)', marginTop: '1rem', fontSize: '0.9rem' }}>{loginError}</p>}
-                      <button type="submit" className="login-btn">Giriş Yap</button>
-                  </form>
-              </div>
+  // Kullanıcı değiştiğinde kayıtlı hisseleri yükle
+  useEffect(() => {
+    if (user) {
+      const saved = localStorage.getItem(`tracked_symbols_${user}`);
+      if (saved) {
+        try {
+          setTrackedSymbols(JSON.parse(saved));
+        } catch (e) {
+          console.error("Geçmiş yüklenemedi", e);
+          setTrackedSymbols([]);
+        }
+      } else {
+        setTrackedSymbols([]);
+      }
+    }
+  }, [user]);
+
+  // Takip listesi değiştiğinde kaydet
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem(`tracked_symbols_${user}`, JSON.stringify(trackedSymbols));
+    }
+  }, [trackedSymbols, user]);
+
+  // Arama Önerilerini Çek
+  useEffect(() => {
+    let active = true;
+    
+    const fetchSuggestions = async () => {
+      if (searchTerm.trim().length < 2) {
+        if (active) setSuggestions([]);
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE_URL}/search/suggestions?q=${searchTerm}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (active) {
+            setSuggestions(Array.isArray(data) ? data : []);
+          }
+        }
+      } catch (err) {
+        console.error("Suggestion fetch error:", err);
+      }
+    };
+
+    const timeoutId = setTimeout(fetchSuggestions, 300); // Debounce
+    return () => {
+      active = false;
+      clearTimeout(timeoutId);
+    };
+  }, [searchTerm]);
+
+  if (!isLoggedIn) {
+    return (
+      <div className="login-container">
+        <div className="login-box">
+          <div className="logo" style={{ textAlign: 'center', marginBottom: '2rem', letterSpacing: '0px' }}>
+            PhD TERMİNAL
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.5rem', fontWeight: 'normal' }}>{APP_VERSION}</div>
           </div>
-      );
+          <form onSubmit={handleLogin}>
+            <div className="form-group">
+              <label>Kullanıcı Adı</label>
+              <input 
+                type="text" 
+                className="search-bar" 
+                style={{ width: '100%' }}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </div>
+            <div className="form-group" style={{ marginTop: '1rem' }}>
+              <label>Şifre</label>
+              <input 
+                type="password" 
+                className="search-bar" 
+                style={{ width: '100%' }}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            {authError && <p style={{ color: 'var(--loss-color)', marginTop: '0.5rem' }}>{authError}</p>}
+            <button type="submit" className="login-btn">Giriş Yap</button>
+          </form>
+        </div>
+      </div>
+    );
   }
+
+
+
+
+  const displayedStocks = getDisplayStocks();
 
   return (
     <div className="app-container">
-      {/* Sidebar */}
       <aside className="sidebar">
-          <div className="logo">ECOS</div>
+        <div className="logo" style={{ letterSpacing: '0px' }}>
+          PhD TERMİNAL
+          <div style={{ fontSize: '0.7rem', color: 'var(--accent-color)', marginTop: '0.2rem', fontWeight: 'normal' }}>{APP_VERSION}</div>
+        </div>
+        <nav>
           <ul className="nav-links">
-              <li className={`nav-item ${activeView === 'dashboard' ? 'active' : ''}`} onClick={() => { setActiveView('dashboard'); setSelectedStock(null); }}>
-                  📊 Pano
-              </li>
-              <li className={`nav-item ${activeView === 'favorites' ? 'active' : ''}`} onClick={() => { setActiveView('favorites'); setSelectedStock(null); }}>
-                  ★ Favoriler
-              </li>
-              <li className="nav-item" onClick={logout}>
-                  🚪 Çıkış
-              </li>
+            <li className={`nav-item ${activeTab === 'Dashboard' ? 'active' : ''}`} onClick={() => { setActiveTab('Dashboard'); setActiveStock(null); }}>Dashboard</li>
+            <li className={`nav-item ${activeTab === 'Favorites' ? 'active' : ''}`} onClick={() => { setActiveTab('Favorites'); setActiveStock(null); }}>Favoriler</li>
+            {user === 'admin' && (
+              <li className={`nav-item ${activeTab === 'Admin' ? 'active' : ''}`} onClick={() => setActiveTab('Admin')}>Admin Paneli</li>
+            )}
+            <li className="nav-item" onClick={() => { setIsLoggedIn(false); localStorage.removeItem('storedUser'); }}>Çıkış Yap</li>
           </ul>
+        </nav>
       </aside>
 
-      {/* Main Content */}
+      <div className="online-panel">
+        <h4 style={{fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem', paddingLeft: '0.5rem'}}>ONLINE</h4>
+        <div className="online-list">
+          {onlineUsers.map(u => (
+            <div key={u} className="online-user-item">
+              <span className="online-dot shine"></span>
+              <span className="online-name">{u}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <main className="main-content">
-        <header>
-            <div style={{ position: 'relative' }}>
-                <input 
+        {activeTab === 'Admin' && user === 'admin' ? (
+          <div className="admin-view">
+            <h1>Admin Paneli</h1>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Kayıtlı kullanıcıları yönetin ve yenilerini ekleyin.</p>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr', gap: '2rem' }}>
+              <div className="stock-card">
+                <h3>Yeni Kullanıcı Ekle</h3>
+                <form onSubmit={handleCreateUser} style={{ marginTop: '1rem' }}>
+                  <div className="form-group">
+                    <label>Kullanıcı Adı</label>
+                    <input 
+                      type="text" 
+                      className="search-bar" 
+                      style={{ width: '100%', marginBottom: '1rem' }}
+                      value={newUsername}
+                      onChange={(e) => setNewUsername(e.target.value)}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Şifre</label>
+                    <input 
+                      type="password" 
+                      className="search-bar" 
+                      style={{ width: '100%', marginBottom: '1rem' }}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                    />
+                  </div>
+                  <button type="submit" className="login-btn">Kullanıcıyı Kaydet</button>
+                </form>
+              </div>
+
+              <div className="stock-table-container">
+                <h3>Kayıtlı Kullanıcılar</h3>
+                <table style={{ marginTop: '1rem' }}>
+                  <thead>
+                    <tr>
+                      <th>KULLANICI ADI</th>
+                      <th>YETKİ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((uname) => (
+                      <tr key={uname}>
+                        <td><strong>{uname}</strong></td>
+                        <td>
+                          <span className="badge" style={{ color: uname === 'admin' ? 'var(--accent-color)' : 'white' }}>
+                            {uname === 'admin' ? 'Admin' : 'Arkadaş'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            </div>
+            ) : activeStock ? (
+                <StockDetailView 
+                    symbol={activeStock} 
+                    onBack={() => setActiveStock(null)} 
+                    toggleFavorite={toggleFavorite}
+                    isFavorite={favoriteSymbols.includes(activeStock)}
+                />
+            ) : (
+            <>
+            <header>
+              <h1>Hoş geldin, {user}</h1>
+              <div className="search-container" style={{ position: 'relative', width: '100%', maxWidth: '600px', zIndex: 50 }}>
+                <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
+                  <input 
                     type="text" 
                     className="search-bar" 
-                    placeholder="Hisse Ara (örn: THYAO)..." 
+                    placeholder="Hisse ara (Örn: nv, karsn, thyao)..." 
                     value={searchTerm}
-                    onChange={(e) => handleSearch(e.target.value)}
+                    onChange={(e) => {
+                      setSearchTerm(e.target.value);
+                      setShowSuggestions(true);
+                    }}
+                    onKeyDown={(e) => e.key === 'Enter' && handleManualSearch()}
                     onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-                    onFocus={() => searchTerm.length >= 2 && setShowSuggestions(true)}
-                />
-                {showSuggestions && searchSuggestions.length > 0 && (
-                    <div className="suggestions-dropdown">
-                        {searchSuggestions.map((s) => (
-                            <div key={s.symbol} className="suggestion-item" onClick={() => selectSuggestion(s)}>
-                                <div className="suggestion-info">
-                                    <span className="suggestion-symbol">{s.symbol}</span>
-                                    <span className="suggestion-name">{s.name}</span>
-                                </div>
-                                <span className="suggestion-exchange">{s.exchange}</span>
-                            </div>
-                        ))}
-                    </div>
+                    style={{ flex: 1 }}
+                  />
+                  <button 
+                    onClick={() => handleManualSearch()}
+                    className="login-btn"
+                    style={{ width: 'auto', padding: '0 1.5rem', height: '45px', marginTop: 0 }}
+                  >
+                    Ara
+                  </button>
+                </div>
+
+                {showSuggestions && suggestions.length > 0 && (
+                  <div className="suggestions-dropdown">
+                    {suggestions.map((s, idx) => (
+                      <div 
+                        key={`${s.symbol}-${idx}`} 
+                        className="suggestion-item"
+                        onClick={() => handleManualSearch(s.symbol)}
+                      >
+                        <div className="suggestion-info">
+                          <span className="suggestion-symbol">{s.symbol}</span>
+                          <span className="suggestion-name">{s.name}</span>
+                        </div>
+                        <span className="suggestion-exchange">{s.exchange}</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: '0.9rem', fontWeight: 'bold' }}>{user}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--accent-color)' }}>● Çevrimiçi</div>
-                </div>
-            </div>
-        </header>
+              </div>
+              <small style={{display: 'block', color: 'var(--text-secondary)', marginTop: '0.5rem'}}>
+                *Listede olmayan hisseler Yahoo Finance'den anlık çekilir.
+              </small>
+            </header>
 
-        {activeView === 'detail' && selectedStock ? (
-            <StockDetailView 
-                symbol={selectedStock} 
-                onBack={() => setActiveView('dashboard')} 
-                toggleFavorite={toggleFavorite}
-                isFavorite={favorites.includes(selectedStock)}
-            />
-        ) : (
-          <>
-            <div style={{ marginBottom: '2rem' }}>
-                <h1 style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>
-                    {activeView === 'dashboard' ? 'Piyasa Genel Bakış' : 'Favorilerim'}
-                </h1>
-                <p style={{ color: 'var(--text-secondary)' }}>
-                    {activeView === 'dashboard' ? 'BIST 100 ve popüler hisselerin anlık durumu' : 'Takip ettiğiniz hisseler'}
-                </p>
-            </div>
-
-            {loadingStocks && page === 1 ? (
-                <div className="loading-state">
-                    <div className="spinner"></div>
-                    <p>Veriler yükleniyor...</p>
-                </div>
+            {loading ? (
+              <div className="loading-state">Yükleniyor...</div>
             ) : (
               <>
                 <div className="dashboard-grid">
-                    {(activeView === 'favorites' ? stocks.filter(s => favorites.includes(s.symbol)) : stocks).map(stock => (
-                        <div key={stock.symbol} className="stock-card" onClick={() => { setSelectedStock(stock.symbol); setActiveView('detail'); }}>
-                            <div className="stock-header">
-                                <div className="stock-id">
-                                    <span className="stock-symbol">{stock.symbol.replace('.IS', '')}</span>
-                                    <span className="stock-name-small">{stock.name}</span>
-                                </div>
-                                <button 
-                                    className="fav-btn"
-                                    onClick={(e) => toggleFavorite(stock.symbol, e)}
-                                    style={{ color: favorites.includes(stock.symbol) ? '#FFD700' : 'rgba(255,255,255,0.2)' }}
-                                >
-                                    ★
-                                </button>
-                            </div>
-                            <div className="stock-price">
-                                {stock.price?.toFixed(2)} ₺
-                            </div>
-                            <div className="stock-meta">
-                                <span className={stock.change > 0 ? 'change-up' : 'change-down'}>
-                                    {stock.change > 0 ? '+' : ''}{stock.changePercent}%
-                                </span>
-                                <span>Vol: {(stock.volume / 1e6).toFixed(1)}M</span>
-                            </div>
-                            {stock.sector_group && (
-                                <div style={{ marginTop: '10px' }}>
-                                    <span className="badge" style={{ fontSize: '0.65rem', background: 'rgba(255,255,255,0.05)', color: 'var(--text-secondary)' }}>
-                                        {stock.sector_group}
-                                    </span>
-                                </div>
-                            )}
+                  {(activeTab === 'Favorites' ? displayedStocks : displayedStocks.slice(0, 3)).map(stock => (
+                    <div 
+                        key={stock.symbol} 
+                        className="stock-card" 
+                        style={{position: 'relative', cursor: 'pointer'}}
+                        onClick={() => setActiveStock(stock.symbol)}
+                    >
+                      <button 
+                        className="fav-btn"
+                        onClick={(e) => toggleFavorite(stock.symbol, e)}
+                        style={{
+                          position: 'absolute',
+                          top: '10px',
+                          right: '10px',
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: favoriteSymbols.includes(stock.symbol) ? '#FFD700' : 'var(--text-secondary)',
+                          fontSize: '1.2rem',
+                          zIndex: 10
+                        }}
+                      >
+                        {favoriteSymbols.includes(stock.symbol) ? '★' : '☆'}
+                      </button>
+                      <div className="stock-header">
+                        <div className="stock-id">
+                          <span className="stock-symbol">{stock.symbol.replace('.IS', '')}</span>
+                          <div className="stock-name-small">{stock.name}</div>
+                        </div>
+                        <div style={{textAlign: 'right', marginTop:'20px'}}>
+                           <div className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''} style={{fontWeight: 'bold', fontSize: '1.2rem'}}>
+                              {stock.changePercent}%
+                           </div>
+                        </div>
+                      </div>
+                      <div className="stock-price">{stock.price.toLocaleString()}</div>
+                      <div style={{fontSize: '0.8rem', color:'var(--text-secondary)', marginTop:'5px'}}>
+                        Açılış: {stock.open ? stock.open.toLocaleString() : '-'}
+                      </div>
+
+                    </div>
+                  ))}
+                </div>
+
+                {activeTab === 'Dashboard' && displayedStocks.length > 3 && (
+                    <div className="stock-table-container">
+                    <h3>Diğer Geçmiş</h3>
+                    {Object.entries(
+                        displayedStocks.slice(3).reduce((groups, stock) => {
+                            const sector = stock.sector_group || 'Diğer';
+                            if (!groups[sector]) groups[sector] = [];
+                            groups[sector].push(stock);
+                            return groups;
+                        }, {})
+                    ).map(([sector, stocks]) => (
+                        <div key={sector} style={{ marginBottom: '2rem' }}>
+                            <h4 style={{ 
+                                color: 'var(--accent-color)', 
+                                borderBottom: '1px solid var(--border-color)', 
+                                paddingBottom: '0.5rem', 
+                                marginBottom: '0.5rem',
+                                marginTop: '1rem'
+                            }}>
+                                {sector}
+                            </h4>
+                            <table style={{ marginTop: '0.5rem' }}>
+                            <thead>
+                                <tr>
+                                <th>SEMBOL</th>
+                                <th>AÇILIŞ</th>
+                                <th>FİYAT</th>
+                                <th>DEĞİŞİM</th>
+                                <th>FAVORİ</th> 
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {stocks.map(stock => (
+                                <tr key={stock.symbol} onClick={() => setActiveStock(stock.symbol)} style={{cursor:'pointer'}}>
+                                    <td>
+                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                        <span className="badge" style={{width: 'fit-content', marginBottom:'4px'}}>{stock.symbol.replace('.IS', '')}</span>
+                                        <small style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{stock.name}</small>
+                                    </div>
+                                    </td>
+                                    <td>{stock.open ? stock.open.toLocaleString() : '-'}</td>
+                                    <td>{stock.price.toLocaleString()}</td>
+                                    <td className={stock.change > 0 ? 'change-up' : stock.change < 0 ? 'change-down' : ''}>
+                                    <span style={{fontWeight:'bold'}}>{stock.changePercent}%</span>
+                                    </td>
+                                    <td style={{textAlign: 'center'}}>
+                                    <button 
+                                        onClick={(e) => toggleFavorite(stock.symbol, e)}
+                                        style={{
+                                        background: 'transparent',
+                                        border: 'none',
+                                        color: favoriteSymbols.includes(stock.symbol) ? '#FFD700' : 'var(--text-secondary)',
+                                        fontSize: '1.2rem',
+                                        cursor: 'pointer'
+                                        }}
+                                    >
+                                        {favoriteSymbols.includes(stock.symbol) ? '★' : '☆'}
+                                    </button>
+                                    </td>
+                                </tr>
+                                ))}
+                            </tbody>
+                            </table>
                         </div>
                     ))}
-                </div>
-                
-                {activeView === 'dashboard' && hasMoreStocks && (
-                  <div style={{ textAlign: 'center', marginTop: '2rem' }}>
-                      <button 
-                        onClick={() => fetchStocks(page + 1)}
-                        className="login-btn"
-                        style={{ width: 'auto', padding: '10px 30px', background: 'var(--card-bg)', color: 'white', border: '1px solid var(--border-color)' }}
-                      >
-                          {loadingStocks ? 'Yükleniyor...' : 'Daha Fazla Göster'}
-                      </button>
+                    
+                    {/* Infinite Scroll Tetikleyici */}
+                    <div ref={observerTarget} style={{ height: '20px', margin: '10px 0' }}>
+                       {hasMore && !loading && <span style={{color:'var(--text-secondary)', fontSize:'0.8rem'}}>Daha fazla yükleniyor...</span>}
+                    </div>
+
                   </div>
                 )}
               </>
@@ -311,31 +654,15 @@ function App() {
           </>
         )}
       </main>
-
-      {/* Online Users Panel */}
-      {onlineUsers.length > 0 && (
-          <div className="online-panel fade-in">
-              <h4 style={{ marginBottom: '10px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Çevrimiçi ({onlineUsers.length})</h4>
-              <div className="online-list">
-                  {onlineUsers.map((u, i) => (
-                      <div key={i} className="online-user-item">
-                          <div className="online-dot shine"></div>
-                          <span className="online-name">{u}</span>
-                      </div>
-                  ))}
-              </div>
-          </div>
-      )}
     </div>
   );
 }
 
 function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
   const [detail, setDetail] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('Overview');
   const [financials, setFinancials] = useState(null);
-  const [loadingFinancials, setLoadingFinancials] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [finLoading, setFinLoading] = useState(true);
 
   useEffect(() => {
     const fetchDetail = async () => {
@@ -351,29 +678,23 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
             setLoading(false);
         }
     };
+    const fetchFinancials = async () => {
+        setFinLoading(true);
+        try {
+            const res = await fetch(`${API_BASE_URL}/stocks/${symbol}/financials`);
+            if (res.ok) {
+                const data = await res.json();
+                setFinancials(data);
+            }
+            setFinLoading(false);
+        } catch (e) {
+            console.error("Financial fetch error:", e);
+            setFinLoading(false);
+        }
+    };
     fetchDetail();
+    fetchFinancials();
   }, [symbol]);
-
-  // Fetch financials when tab changes to Financials
-  useEffect(() => {
-      if (activeTab === 'Financials' && !financials && !loadingFinancials) {
-          const fetchFinancials = async () => {
-              setLoadingFinancials(true);
-              try {
-                  const res = await fetch(`${API_BASE_URL}/stocks/${symbol}/financials`);
-                  if (res.ok) {
-                      const data = await res.json();
-                      setFinancials(data);
-                  }
-              } catch(e) {
-                  console.error(e);
-              } finally {
-                  setLoadingFinancials(false);
-              }
-          };
-          fetchFinancials();
-      }
-  }, [activeTab, symbol, financials]);
 
   if (loading) return <div className="loading-state">Detaylar yükleniyor...</div>;
   if (!detail) return <div className="loading-state">Veri bulunamadı. <button onClick={onBack}>Geri Dön</button></div>;
@@ -385,58 +706,8 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
       return num.toLocaleString();
   };
 
-  // Helper to render financials table
-  const renderFinancials = () => {
-      if (loadingFinancials) return <div className="loading-state">Finansallar yükleniyor...</div>;
-      if (!financials || Object.keys(financials).length === 0) return <div className="loading-state">Finansal veri bulunamadı.</div>;
-
-      // Extract periods (sorted descending)
-      const periods = Object.keys(financials).sort((a, b) => {
-          const [y1, p1] = a.split('/').map(Number);
-          const [y2, p2] = b.split('/').map(Number);
-          if (y1 !== y2) return y2 - y1;
-          return p2 - p1;
-      });
-
-      // Extract all unique item names from the first period (assuming consistent structure)
-      // Or collect visible items
-      const firstPeriod = periods[0];
-      const items = Object.keys(financials[firstPeriod]).filter(k => !k.endsWith('_code'));
-
-      return (
-          <div className="stock-card" style={{ overflowX: 'auto' }}>
-              <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Mali Tablolar (Son 12 Dönem)</h3>
-              <table style={{ width: '100%', minWidth: '800px', borderCollapse: 'collapse' }}>
-                  <thead>
-                      <tr>
-                          <th style={{ textAlign: 'left', padding: '10px', borderBottom: '1px solid var(--border-color)', position: 'sticky', left: 0, background: 'var(--secondary-color)', zIndex: 1 }}>Kalem</th>
-                          {periods.map(p => (
-                              <th key={p} style={{ padding: '10px', textAlign: 'right', borderBottom: '1px solid var(--border-color)', minWidth: '100px' }}>{p}</th>
-                          ))}
-                      </tr>
-                  </thead>
-                  <tbody>
-                      {items.map(item => (
-                          <tr key={item} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                              <td style={{ padding: '10px', fontWeight: '500', position: 'sticky', left: 0, background: 'var(--card-bg)', zIndex: 1 }}>{item}</td>
-                              {periods.map(p => {
-                                  const val = financials[p]?.[item];
-                                  return (
-                                      <td key={`${p}-${item}`} style={{ padding: '10px', textAlign: 'right', fontFamily: 'monospace' }}>
-                                          {val !== undefined ? val.toLocaleString() : '-'}
-                                      </td>
-                                  );
-                              })}
-                          </tr>
-                      ))}
-                  </tbody>
-              </table>
-          </div>
-      );
-  };
-
   return (
-      <div className="fade-in" style={{ maxWidth: '1200px', margin: '0 auto' }}>
+      <div className="fade-in" style={{ maxWidth: '1000px', margin: '0 auto' }}>
           <button onClick={onBack} style={{ marginBottom: '1rem', background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', display:'flex', alignItems:'center', gap:'5px' }}>
               ← Listeye Dön
           </button>
@@ -468,139 +739,144 @@ function StockDetailView({ symbol, onBack, toggleFavorite, isFavorite }) {
               </div>
           </div>
 
-          {/* Tabs */}
-          <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
-              <button 
-                onClick={() => setActiveTab('Overview')} 
-                style={{ 
-                    padding: '10px 20px', 
-                    background: 'none', 
-                    border: 'none', 
-                    borderBottom: activeTab === 'Overview' ? '2px solid var(--accent-color)' : '2px solid transparent',
-                    color: activeTab === 'Overview' ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    cursor: 'pointer',
-                    fontSize: '1rem'
-                }}
-              >
-                  Genel Bakış
-              </button>
-              <button 
-                onClick={() => setActiveTab('Financials')} 
-                style={{ 
-                    padding: '10px 20px', 
-                    background: 'none', 
-                    border: 'none', 
-                    borderBottom: activeTab === 'Financials' ? '2px solid var(--accent-color)' : '2px solid transparent',
-                    color: activeTab === 'Financials' ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    cursor: 'pointer',
-                    fontSize: '1rem'
-                }}
-              >
-                  Finansallar
-              </button>
-          </div>
-
-          {activeTab === 'Overview' ? (
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '2rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '2rem' }}>
+              
+              {/* Sol Kolon: Açıklama ve İstatistikler */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
                   
-                  {/* Sol Kolon: Açıklama ve İstatistikler */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-                      
-                      {/* Şirket Künyesi / Açıklama */}
-                      <div className="stock-card">
-                          <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Şirket Hakkında</h3>
-                          <p style={{ lineHeight: '1.6', color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-                              {detail.description}
-                          </p>
-                          {detail.website && (
-                              <a href={detail.website} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: '15px', color: 'var(--accent-color)', textDecoration: 'none' }}>
-                                  Resmi Web Sitesi →
-                              </a>
-                          )}
-                      </div>
-
-                      {/* Piyasa Verileri */}
-                      <div className="stock-card">
-                           <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Piyasa Verileri</h3>
-                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
-                               <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Piyasa Değeri</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{formatLargeNumber(detail.marketCap)}</div>
-                               </div>
-                               <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>F/K Oranı</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.peRatio ? detail.peRatio.toFixed(2) : '-'}</div>
-                               </div>
-                               <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Temettü Verimi</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.dividendYield ? (detail.dividendYield * 100).toFixed(2) + '%' : '-'}</div>
-                               </div>
-                               <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Ort. Hacim (3 Ay)</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{formatLargeNumber(detail.averageVolume)}</div>
-                               </div>
-                                <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Açılış</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.open?.toLocaleString()}</div>
-                               </div>
-                               <div>
-                                   <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Önceki Kapanış</div>
-                                   <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.previousClose?.toLocaleString()}</div>
-                               </div>
-                           </div>
-                      </div>
+                  {/* Şirket Künyesi / Açıklama */}
+                  <div className="stock-card">
+                      <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Şirket Hakkında</h3>
+                      <p style={{ lineHeight: '1.6', color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
+                          {detail.description}
+                      </p>
+                      {detail.website && (
+                          <a href={detail.website} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: '15px', color: 'var(--accent-color)', textDecoration: 'none' }}>
+                              Resmi Web Sitesi →
+                          </a>
+                      )}
                   </div>
 
-                  {/* Sağ Kolon: Fiyat Aralığı */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-                      <div className="stock-card">
-                          <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Fiyat Aralığı</h3>
-                          
-                          {/* Günlük Aralık */}
-                          <div style={{ marginBottom: '20px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                                  <span>Günlük Düşük</span>
-                                  <span>Günlük Yüksek</span>
-                              </div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
-                                  <span>{detail.dayLow?.toLocaleString()}</span>
-                                  <span>{detail.dayHigh?.toLocaleString()}</span>
-                              </div>
-                              <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', marginTop: '5px', borderRadius: '2px', position: 'relative' }}>
-                                 <div style={{ 
-                                     position: 'absolute', 
-                                     top: 0, bottom: 0, 
-                                     left: `${((detail.price - detail.dayLow) / (detail.dayHigh - detail.dayLow)) * 100}%`, 
-                                     width: '6px', height: '10px', marginTop: '-3px', background: 'var(--accent-color)', borderRadius: '50%' 
-                                 }} />
-                              </div>
-                          </div>
-
-                          {/* 52 Haftalık Aralık */}
+                  {/* Piyasa Verileri */}
+                  <div className="stock-card">
+                       <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Piyasa Verileri</h3>
+                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
                            <div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>
-                                  <span>52 Hafta Düşük</span>
-                                  <span>52 Hafta Yüksek</span>
-                              </div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
-                                  <span>{detail.fiftyTwoWeekLow?.toLocaleString()}</span>
-                                  <span>{detail.fiftyTwoWeekHigh?.toLocaleString()}</span>
-                              </div>
-                              <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', marginTop: '5px', borderRadius: '2px', position: 'relative' }}>
-                                   <div style={{ 
-                                     position: 'absolute', 
-                                     top: 0, bottom: 0, 
-                                     left: `${((detail.price - detail.fiftyTwoWeekLow) / (detail.fiftyTwoWeekHigh - detail.fiftyTwoWeekLow)) * 100}%`, 
-                                     width: '6px', height: '10px', marginTop: '-3px', background: 'var(--accent-color)', borderRadius: '50%' 
-                                 }} />
-                              </div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Piyasa Değeri</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{formatLargeNumber(detail.marketCap)}</div>
+                           </div>
+                           <div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>F/K Oranı</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.peRatio ? detail.peRatio.toFixed(2) : '-'}</div>
+                           </div>
+                           <div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Temettü Verimi</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.dividendYield ? (detail.dividendYield * 100).toFixed(2) + '%' : '-'}</div>
+                           </div>
+                           <div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Ort. Hacim (3 Ay)</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{formatLargeNumber(detail.averageVolume)}</div>
+                           </div>
+                            <div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Açılış</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.open?.toLocaleString()}</div>
+                           </div>
+                           <div>
+                               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Önceki Kapanış</div>
+                               <div style={{ fontSize: '1.1rem', fontWeight: 'bold' }}>{detail.previousClose?.toLocaleString()}</div>
+                           </div>
+                       </div>
+                  </div>
+              </div>
+
+              {/* Sağ Kolon: Fiyat Aralığı */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+                  <div className="stock-card">
+                      <h3 style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>Fiyat Aralığı</h3>
+                      
+                      {/* Günlük Aralık */}
+                      <div style={{ marginBottom: '20px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>
+                              <span>Günlük Düşük</span>
+                              <span>Günlük Yüksek</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
+                              <span>{detail.dayLow?.toLocaleString()}</span>
+                              <span>{detail.dayHigh?.toLocaleString()}</span>
+                          </div>
+                          <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', marginTop: '5px', borderRadius: '2px', position: 'relative' }}>
+                             <div style={{ 
+                                 position: 'absolute', 
+                                 top: 0, bottom: 0, 
+                                 left: `${((detail.price - detail.dayLow) / (detail.dayHigh - detail.dayLow)) * 100}%`, 
+                                 width: '6px', height: '10px', marginTop: '-3px', background: 'var(--accent-color)', borderRadius: '50%' 
+                             }} />
+                          </div>
+                      </div>
+
+                      {/* 52 Haftalık Aralık */}
+                       <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '5px' }}>
+                              <span>52 Hafta Düşük</span>
+                              <span>52 Hafta Yüksek</span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold' }}>
+                              <span>{detail.fiftyTwoWeekLow?.toLocaleString()}</span>
+                              <span>{detail.fiftyTwoWeekHigh?.toLocaleString()}</span>
+                          </div>
+                          <div style={{ height: '4px', background: 'rgba(255,255,255,0.1)', marginTop: '5px', borderRadius: '2px', position: 'relative' }}>
+                               <div style={{ 
+                                 position: 'absolute', 
+                                 top: 0, bottom: 0, 
+                                 left: `${((detail.price - detail.fiftyTwoWeekLow) / (detail.fiftyTwoWeekHigh - detail.fiftyTwoWeekLow)) * 100}%`, 
+                                 width: '6px', height: '10px', marginTop: '-3px', background: 'var(--accent-color)', borderRadius: '50%' 
+                             }} />
                           </div>
                       </div>
                   </div>
               </div>
-          ) : (
-              renderFinancials()
-          )}
+          </div>
+
+          {/* Mali Tablolar Paneli */}
+          <div className="stock-card" style={{ marginTop: '2rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '10px', marginBottom: '15px' }}>
+                  <h3 style={{ margin: 0 }}>Mali Tablolar (Son 12 Dönem)</h3>
+                  {finLoading && <span style={{ fontSize: '0.8rem', color: 'var(--accent-color)' }}>Veriler çekiliyor...</span>}
+              </div>
+
+              {financials ? (
+                  <div className="stock-table-container" style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                      <table style={{ minWidth: '1500px' }}>
+                          <thead style={{ position: 'sticky', top: 0, background: 'var(--card-bg)', zIndex: 10 }}>
+                              <tr>
+                                  <th style={{ position: 'sticky', left: 0, background: 'var(--card-bg)', zIndex: 11, minWidth: '300px' }}>KALEM</th>
+                                  {financials.periods.map(period => (
+                                      <th key={period} style={{ textAlign: 'right' }}>{period}</th>
+                                  ))}
+                              </tr>
+                          </thead>
+                          <tbody>
+                              {financials.data.map(item => (
+                                  <tr key={item.code}>
+                                      <td style={{ position: 'sticky', left: 0, background: 'var(--card-bg)', zIndex: 9, fontSize: '0.85rem' }}>
+                                          {item.label}
+                                      </td>
+                                      {financials.periods.map(period => (
+                                          <td key={period} style={{ textAlign: 'right', fontSize: '0.85rem' }}>
+                                              {item.values[period] !== undefined ? item.values[period].toLocaleString() : '-'}
+                                          </td>
+                                      ))}
+                                  </tr>
+                              ))}
+                          </tbody>
+                      </table>
+                  </div>
+              ) : (
+                  <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
+                      {finLoading ? 'Yükleniyor...' : 'Mali veriler şu an ulaşılamaz durumda. Lütfen daha sonra tekrar deneyin.'}
+                  </div>
+              )}
+          </div>
       </div>
   );
 }

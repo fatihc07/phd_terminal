@@ -1,137 +1,174 @@
-import requests
+from datetime import datetime
 import json
 import os
-import time
+import urllib3
+import pandas as pd
+try:
+    from isyatirimhisse import fetch_financials as isy_fetch
+except ImportError:
+    isy_fetch = None
 
-# Directory for storing financial data
-DATA_DIR = os.path.dirname(os.path.abspath(__file__))
-FINANCIALS_FILE = os.path.join(DATA_DIR, "financials.json")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def load_financials():
-    if os.path.exists(FINANCIALS_FILE):
+FINANCIAL_CACHE_FILE = os.path.join(os.path.dirname(__file__), "financial_cache.json")
+
+def load_financial_cache():
+    if os.path.exists(FINANCIAL_CACHE_FILE):
         try:
-            with open(FINANCIALS_FILE, "r", encoding="utf-8") as f:
+            with open(FINANCIAL_CACHE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except:
             return {}
     return {}
 
-def save_financials(data):
+def save_financial_cache(cache):
     try:
-        with open(FINANCIALS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving financials: {e}")
+        with open(FINANCIAL_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except:
+        pass
 
-# Cache in memory
-FINANCIALS_CACHE = load_financials()
+FINANCIAL_CACHE = load_financial_cache()
 
-def fetch_financial_data(symbol):
+def get_financial_group(symbol):
     """
-    Fetches the last 12 periods of financial data for a given symbol from Is Yatirim.
+    isyatirimhisse kütüphanesinin beklediği grup (1, 2, 3)
+    1: XI_29 (Standart)
+    2: UFRS (Bireysel)
+    3: UFRS (Konsolide - Bankalar için de uygundur)
     """
-    symbol = symbol.replace(".IS", "").upper()
-    print(f"Fetching financials for {symbol}...")
-    
-    # Define last 12 quarters (approx 3 years)
-    # We need to be dynamic with current date, but for simplicity let's start from 2024/9 backwards
-    # Or use current year/month.
-    
-    current_year = int(time.strftime("%Y"))
-    current_month = int(time.strftime("%m"))
-    
-    # Determine the latest possible quarter
-    if current_month >= 11:
-         start_period = 9
-    elif current_month >= 8: # Q2 usually announced by August
-         start_period = 6
-    elif current_month >= 5: # Q1 by May
-         start_period = 3
+    if symbol in ["AKBNK", "GARAN", "ISCTR", "HALKB", "VAKBN", "TSKB", "ICBCT"]:
+        return "3"
+    return "1"
+
+def get_periods(count=12):
+    """
+    Son N dönemi (Yıl, Çeyrek) liste olarak döner.
+    """
+    now = datetime.now()
+    year = now.year
+    # Mevcut çeyrek (1: Mart, 2: Haziran, 3: Eylül, 4: Aralık)
+    # Bilançolar genelde 2-3 ay sonra açıklanır. 
+    # Mart (3), Haziran (6), Eylül (9), Aralık (12)
+    month = now.month
+    if month < 4:
+        # Daha 1. çeyrek bilançoları gelmemiştir, geçen yılın sonundan başla
+        start_year = year - 1
+        start_period = 12
+    elif month < 7:
+        start_year = year
+        start_period = 3
+    elif month < 10:
+        start_year = year
+        start_period = 6
     else:
-         start_period = 12
-         current_year -= 1
-         
-    # Generate list of 12 periods [ (2024,9), (2024,6), ... ]
+        start_year = year
+        start_period = 9
+    
     periods = []
-    y, p = current_year, start_period
-    for _ in range(12):
-        periods.append((y, p))
-        p -= 3
-        if p <= 0:
-            p = 12
-            y -= 1
+    curr_y = start_year
+    curr_p = start_period
+    
+    for _ in range(count):
+        periods.append((curr_y, curr_p))
+        curr_p -= 3
+        if curr_p == 0:
+            curr_p = 12
+            curr_y -= 1
             
-    # Function to fetch a batch of periods (max 4 usually allowed per request structure)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Referer": "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/Mali-Tablolar.aspx"
-    }
-    
-    # We will merge results into a single structure
-    # Structure: { "YYYY/Q": { "Net Satışlar": 123, ... }, ... }
-    merged_data = {}
-    
-    # Is Yatirim default financial group is XI_29 (IFRS). Banks use different codes (XI_29 usually still ok or different path).
-    # For simplicity assuming XI_29.
-    
-    # Helper to map period to index in response (value1, value2, etc.)
-    # We prefer making 3 requests of 4 periods each.
-    
-    chunks = [periods[i:i+4] for i in range(0, len(periods), 4)]
-    
-    for chunk in chunks:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo"
-        params = {
-            "companyCode": symbol,
-            "exchange": "TRY",
-            "financialGroup": "XI_29",
-        }
-        for i, (y, p) in enumerate(chunk):
-            params[f"year{i+1}"] = y
-            params[f"period{i+1}"] = p
-            
-        try:
-            # Construct query string manually to ensure correct order/format if needed, 
-            # but requests params usually work.
-            response = requests.get(url, params=params, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                # Data is a list of items. Each item has value1, value2, value3, value4 corresponding to the requested periods.
-                if not data:
-                    continue
-                    
-                # Iterate rows
-                for row in data:
-                    item_code = row.get("itemCode")
-                    item_name = row.get("itemDescTr")
-                    
-                    if not item_name: continue
-                    
-                    for i, (y, p) in enumerate(chunk):
-                        val_key = f"value{i+1}"
-                        val = row.get(val_key)
-                        
-                        period_key = f"{y}/{p}"
-                        if period_key not in merged_data:
-                            merged_data[period_key] = {}
-                            
-                        # Store simple key-value
-                        merged_data[period_key][item_name] = val
-                        merged_data[period_key][f"{item_name}_code"] = item_code
+    return periods
 
-            time.sleep(0.5) # Be gentle
-        except Exception as e:
-            print(f"Error fetching chunk {chunk}: {e}")
-            
-    # Update cache
-    if merged_data:
-        FINANCIALS_CACHE[symbol] = merged_data
-        save_financials(FINANCIALS_CACHE)
-        return merged_data
-    else:
-        return {}
+def fetch_financials(symbol):
+    """
+    isyatirimhisse kütüphanesini kullanarak son 12 bilançoyu çeker.
+    """
+    print(f"BİLGİ: {symbol} için mali tablo çekme işlemi başladı...")
+    if not isy_fetch:
+        print("HATA: isyatirimhisse kütüphanesi yüklü değil! 'pip install isyatirimhisse pandas' komutunu çalıştırın.")
+        return None
 
-def get_stored_financials(symbol):
-    symbol = symbol.replace(".IS", "").upper()
-    return FINANCIALS_CACHE.get(symbol)
+    symbol = symbol.upper().replace(".IS", "")
+    group = get_financial_group(symbol)
+    
+    # Son 12 dönemi kapsayacak şekilde son 4 yılın verisini isteyelim
+    curr_year = datetime.now().year
+    start_year = curr_year - 4
+    
+    try:
+        # Kütüphane yardımıyla veriyi çekelim
+        df = isy_fetch(
+            symbol=symbol, 
+            start_year=str(start_year), 
+            end_year=str(curr_year), 
+            financial_group=group
+        )
+        
+        if df is None or df.empty:
+            print(f"Uyarı: {symbol} için veri bulunamadı.")
+            return None
+
+        print(f"BAŞARI: {symbol} için veri çekildi. Sütunlar: {df.columns.tolist()}")
+
+        # Period sütunlarını bulalım (YYYY/M formatında olan sütunlar)
+        meta_cols = ["FINANCIAL_ITEM_CODE", "FINANCIAL_ITEM_NAME_TR", "FINANCIAL_ITEM_NAME_EN", "SYMBOL"]
+        period_cols = [c for c in df.columns if c not in meta_cols]
+        
+        # Dönemleri güncelden eskiye sıralayalım
+        def sort_key(p):
+            try:
+                parts = p.split('/')
+                return (int(parts[0]), int(parts[1]))
+            except:
+                return (0, 0)
+        
+        period_cols.sort(key=sort_key, reverse=True)
+        period_cols = period_cols[:12] # Son 12 dönemi al
+        
+        all_data = []
+        for _, row in df.iterrows():
+            item = {
+                "code": row.get("FINANCIAL_ITEM_CODE", ""),
+                "label": row.get("FINANCIAL_ITEM_NAME_TR", ""),
+                "values": {}
+            }
+            for p in period_cols:
+                val = row.get(p)
+                # NaN kontrolü (pandas'ta NaN !== NaN)
+                if val != val or val is None:
+                    val = None
+                item["values"][p] = val
+            all_data.append(item)
+            
+        if all_data:
+            res = {
+                "last_updated": datetime.now().isoformat(),
+                "data": all_data,
+                "periods": period_cols
+            }
+            FINANCIAL_CACHE[symbol] = res
+            save_financial_cache(FINANCIAL_CACHE)
+            return res
+            
+    except Exception as e:
+        print(f"isyatirimhisse hatası ({symbol}): {e}")
+        
+    return None
+
+def get_stock_financials(symbol):
+    """
+    Önce cache'e bakar, yoksa veya eskiyse çeker.
+    """
+    symbol = symbol.upper().replace(".IS", "")
+    cached = FINANCIAL_CACHE.get(symbol)
+    
+    # Eğer cache yoksa veya 1 günden eskiyse güncelle
+    should_update = True
+    if cached:
+        last_updated = datetime.fromisoformat(cached["last_updated"])
+        if (datetime.now() - last_updated).days < 1:
+            should_update = False
+            
+    if should_update:
+        return fetch_financials(symbol)
+    
+    return cached

@@ -20,6 +20,7 @@ lsof -ti :3000 | xargs kill -9 2>/dev/null
 
 # Backend'i başlat (0.0.0.0 ile her yerden erişime açıyoruz)
 cd "$BASE_DIR/backend"
+python3 -m pip install -r requirements.txt
 python3 main.py > "$BASE_DIR/backend.log" 2>&1 &
 
 # Frontend'i başlat (--host ile dışarıya açıyoruz)
